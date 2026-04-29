@@ -446,7 +446,7 @@ fn test_withdraw_all_partial_liquidity_emits_burned_shares() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (contract_id, agent, owner, usdc_token, blend_pool) =
+    let (contract_id, _agent, owner, usdc_token, blend_pool) =
         setup_vault_with_token_and_blend(&env);
     let client = NeuroWealthVaultClient::new(&env, &contract_id);
     let token_client = TestTokenClient::new(&env, &usdc_token);
@@ -458,22 +458,65 @@ fn test_withdraw_all_partial_liquidity_emits_burned_shares() {
     let deposit_amount = 10_000_000_i128;
     mint_and_deposit(&env, &client, &usdc_token, &user, deposit_amount);
 
+    // Get post-deposit state for accurate calculations
+    let shares_before = client.get_shares(&user);
+    let total_shares_before = client.get_total_shares();
+    let total_assets_before = client.get_total_assets();
+
     client.rebalance(&symbol_short!("blend"), &900_i128);
 
+    // After rebalance: 90% in blend (9M), 10% in vault (1M)
+    // Vault balance is 1,000,000
+
     // Drain most pool liquidity to force partial fulfillment in withdraw_all.
+    // Pool had 9M, drain 8M, leaving 1M in pool
     token_client.transfer(&blend_pool, &sink, &8_000_000_i128);
 
-    let shares_before = client.get_shares(&user);
-    let _ = client.withdraw_all(&user);
+    // Pre-withdrawal checks
+    let vault_balance_before = token_client.balance(&contract_id);
+    let blend_balance = token_client.balance(&blend_pool);
+
+    // Expected: vault has 1M, blend pool has 1M
+    // User entitled to 10M (full conversion of shares)
+    // Available = vault_balance + blend_withdrawal
+    // Blend can only return min(needed, pool_balance) where needed = 9M, pool_balance = 1M
+    // So blend returns 1M
+    // Total available = 1M (vault) + 1M (from blend) = 2M
+
+    let entitled_amount = client.convert_to_assets(&shares_before);
+    let expected_available_usdc = vault_balance_before + blend_balance; // 1M + 1M = 2M
+
+    // When available < entitled, shares_to_burn = convert_to_shares(available)
+    // shares_to_burn = available * total_shares / total_assets
+    // shares_to_burn = 2M * 10M / 10M = 2M (assuming 1:1 ratio)
+    let expected_shares_to_burn = client.convert_to_shares(&expected_available_usdc);
+
+    let withdrawn = client.withdraw_all(&user);
     let shares_after = client.get_shares(&user);
-    let expected_burned = shares_before - shares_after;
+
+    // Verify we got partial liquidity
+    assert!(withdrawn < entitled_amount, "Should be partial withdrawal");
+    assert!(withdrawn > 0, "Should withdraw some amount");
+
+    // Verify shares burned matches expected calculation (not full shares)
+    let actual_shares_burned = shares_before - shares_after;
+    assert_eq!(actual_shares_burned, expected_shares_to_burn,
+        "Actual burned shares should match calculated expected shares");
+    assert!(actual_shares_burned < shares_before,
+        "Should not burn all user shares in partial liquidity scenario");
 
     let withdraw_events = find_events_by_topic(env.events().all(), &env, TOPIC_WITHDRAW);
     let last_event_data = &withdraw_events.last().unwrap().2;
     let event =
         WithdrawEvent::try_from_val(&env, last_event_data).expect("Should be a WithdrawEvent");
 
-    assert!(expected_burned > 0, "Partial withdrawal must burn positive shares");
-    assert!(expected_burned < shares_before, "Partial withdrawal must not burn all shares");
-    assert_eq!(event.shares, expected_burned, "Event shares must equal burned shares");
+    // CRITICAL: Event must emit shares_to_burn (actual burned), NOT full user_shares
+    assert_eq!(event.shares, actual_shares_burned,
+        "Event shares must equal actual burned shares");
+    assert_ne!(event.shares, shares_before,
+        "Event must NOT emit full user shares in partial liquidity path");
+    assert_eq!(event.shares, expected_shares_to_burn,
+        "Event shares must match independently calculated expected shares");
+    assert_eq!(event.amount, withdrawn,
+        "Event amount must match actual withdrawn amount");
 }
