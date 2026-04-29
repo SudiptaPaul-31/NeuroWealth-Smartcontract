@@ -877,7 +877,8 @@ impl NeuroWealthVault {
         // We use actual_to_return to determine how many shares to burn.
         // If Blend returned less than needed, the user will receive a partial
         // withdrawal and keep their remaining shares.
-        let shares_to_burn = Self::convert_to_shares_internal(&env, actual_to_return);
+        // Use ceiling division to prevent dust attacks (ensure at least 1 share burned when assets > 0).
+        let shares_to_burn = Self::convert_to_shares_internal_ceil(&env, actual_to_return);
         assert!(shares_to_burn > 0, "vault: shares to burn must be positive");
         assert!(
             user_shares >= shares_to_burn,
@@ -1031,7 +1032,8 @@ impl NeuroWealthVault {
                 if available_usdc < entitled_amount {
                     usdc_to_return = available_usdc;
                     assert!(usdc_to_return > 0, "vault: no liquidity available");
-                    shares_to_burn = Self::convert_to_shares_internal(&env, usdc_to_return);
+                    // Use ceiling division to prevent dust attacks (ensure at least 1 share burned).
+                    shares_to_burn = Self::convert_to_shares_internal_ceil(&env, usdc_to_return);
                 }
             }
         }
@@ -2415,6 +2417,7 @@ impl NeuroWealthVault {
     }
 
     /// Internal helper: convert assets (USDC) to shares using current totals.
+    /// Uses floor division - safe for deposits (user gets fewer shares, vault benefits).
     #[inline]
     fn convert_to_shares_internal(env: &Env, assets: i128) -> i128 {
         if assets == 0 {
@@ -2429,6 +2432,32 @@ impl NeuroWealthVault {
             assets
         } else {
             assets.checked_mul(total_shares).expect("vault: conversion mul overflow").checked_div(total_assets).expect("vault: conversion div error")
+        }
+    }
+
+    /// Internal helper: convert assets (USDC) to shares using current totals.
+    /// Uses ceiling division - safe for withdrawals (user burns more shares, vault benefits).
+    /// Prevents dust attacks where floor division could result in 0 shares burned.
+    #[inline]
+    fn convert_to_shares_internal_ceil(env: &Env, assets: i128) -> i128 {
+        if assets == 0 {
+            return 0;
+        }
+
+        let total_shares = Self::get_total_shares_internal(env);
+        let total_assets = Self::get_total_assets_internal(env);
+
+        if total_shares == 0 || total_assets == 0 {
+            // Bootstrap: 1:1 mapping between assets and shares
+            // Ceiling of assets is just assets (assets >= 1)
+            assets
+        } else {
+            // Ceiling division: (a + b - 1) / b
+            // shares = ceil(assets * total_shares / total_assets)
+            let product = assets.checked_mul(total_shares).expect("vault: conversion mul overflow");
+            // Safe addition: total_assets >= 1 in this branch, so (product + total_assets - 1) won't overflow if product didn't
+            let numerator = product.checked_add(total_assets - 1).expect("vault: conversion add overflow");
+            numerator.checked_div(total_assets).expect("vault: conversion div error")
         }
     }
 

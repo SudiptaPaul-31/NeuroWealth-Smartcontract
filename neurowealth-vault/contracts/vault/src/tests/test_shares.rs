@@ -334,8 +334,11 @@ fn test_withdraw_never_over_withdraws() {
     client.withdraw(&user, &10_000_000_i128);
 
     let shares_after = client.get_shares(&user);
-    // At 1.5x price (15M assets / 10M shares), 10M assets = 6,666,666 shares
-    assert_eq!(shares_after, shares_before - 6_666_666_i128);
+    // At 1.5x price (15M assets / 10M shares), 10M assets = 6,666,667 shares (ceiling division)
+    // Using ceiling division prevents dust attacks by ensuring at least 1 share burned per asset
+    let expected_shares_burned = 6_666_667_i128;
+    assert_eq!(shares_after, shares_before - expected_shares_burned,
+        "Should burn ceiling(shares) to prevent rounding exploits");
     assert!(
         client.get_balance(&user) <= balance_before,
         "Balance should not increase from withdrawal"
