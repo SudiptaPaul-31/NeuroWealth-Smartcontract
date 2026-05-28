@@ -3,7 +3,7 @@
 extern crate std;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, testutils::Address as _, Address, Env, Symbol,
+    contract, contractimpl, contracttype, testutils::Address as _, Address, BytesN, Env, Symbol,
     TryFromVal, Val, Vec,
 };
 
@@ -194,7 +194,9 @@ pub mod blend {
                 .unwrap_or(0);
 
             // Calculate actual amount to supply (respecting limits)
-            let actual_amount = if max_supply_limit > 0 {
+            let actual_amount = if max_supply_limit < 0 {
+                0
+            } else if max_supply_limit > 0 {
                 core::cmp::min(request.amount, max_supply_limit)
             } else {
                 request.amount
@@ -347,15 +349,21 @@ pub fn setup_vault(env: &Env) -> (Address, Address, Address) {
 
 /// Sets up a vault with a real deployed TestToken contract.
 pub fn setup_vault_with_token(env: &Env) -> (Address, Address, Address, Address) {
-    let contract_id = env.register_contract(None, NeuroWealthVault);
+    let deployer = Address::generate(env);
+    let salt = BytesN::from_array(env, &[0u8; 32]);
+    let contract_id = env
+        .deployer()
+        .with_address(deployer.clone(), salt.clone())
+        .deployed_address();
+    env.register_contract(&contract_id, NeuroWealthVault);
+
     let client = NeuroWealthVaultClient::new(env, &contract_id);
     let agent = Address::generate(env);
     let usdc_token = env.register_contract(None, TestToken);
-    // Default the owner to the agent for simpler default test setups
-    let owner = agent.clone();
+    // Generate a distinct address for owner to decouple roles
+    let owner = Address::generate(env);
 
-    let deployer = Address::generate(env);
-    client.initialize(&deployer, &owner, &agent, &usdc_token);
+    client.initialize(&deployer, &owner, &agent, &usdc_token, &salt);
 
     (contract_id, agent, owner, usdc_token)
 }

@@ -175,6 +175,9 @@ fn test_event_schema_rebalance_events() {
     // Verify payload structure
     assert_eq!(rebalance_event.protocol, protocol);
     assert_eq!(rebalance_event.expected_apy, expected_apy);
+    assert_eq!(rebalance_event.status, symbol_short!("success"));
+    assert_eq!(rebalance_event.amount_attempted, 0);
+    assert_eq!(rebalance_event.amount_moved, 0);
 }
 
 /// Test that ownership transfer events have correct topics and payload structure

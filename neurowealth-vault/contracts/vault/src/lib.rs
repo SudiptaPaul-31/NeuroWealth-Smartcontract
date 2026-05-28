@@ -222,6 +222,12 @@ pub struct RebalanceEvent {
     pub protocol: Symbol,
     /// Expected APY in basis points (e.g., 850 = 8.5%)
     pub expected_apy: i128,
+    /// Status of the rebalance operation ("success", "failed", "partial")
+    pub status: Symbol,
+    /// Amount attempted to be moved
+    pub amount_attempted: i128,
+    /// Amount actually moved
+    pub amount_moved: i128,
 }
 
 /// Emitted when the vault is paused or unpaused.
@@ -651,9 +657,19 @@ impl NeuroWealthVault {
         owner: Address,
         agent: Address,
         usdc_token: Address,
+        salt: BytesN<32>,
     ) {
         if env.storage().instance().has(&DataKey::Agent) {
             panic!("vault: already initialized");
+        }
+
+        // Verify the deployer is the one that actually deployed the contract
+        let expected_contract_address = env
+            .deployer()
+            .with_address(deployer.clone(), salt)
+            .deployed_address();
+        if expected_contract_address != env.current_contract_address() {
+            panic!("vault: unauthorized deployer");
         }
 
         // Verify the deployer is calling - this prevents front-running
@@ -1262,11 +1278,23 @@ impl NeuroWealthVault {
             let token_client = token::Client::new(&env, &usdc_token);
             let vault_balance = token_client.balance(&env.current_contract_address());
 
+            let mut amount_attempted = 0;
+            let mut amount_moved = 0;
+            let mut status = symbol_short!("success");
+
             if vault_balance > 0 {
+                amount_attempted = vault_balance;
                 let supplied = Self::supply_to_blend(&env, vault_balance);
+                amount_moved = supplied;
 
                 if supplied > 0 {
                     let _total_assets = Self::get_total_assets_internal(&env);
+                }
+
+                if supplied == 0 {
+                    status = symbol_short!("failed");
+                } else if supplied < vault_balance {
+                    status = symbol_short!("partial");
                 }
             }
 
@@ -1275,14 +1303,23 @@ impl NeuroWealthVault {
                 RebalanceEvent {
                     protocol,
                     expected_apy,
+                    status,
+                    amount_attempted,
+                    amount_moved,
                 },
             );
         } else if protocol == symbol_short!("none") {
+            let mut amount_attempted = 0;
+            let mut amount_moved = 0;
+            let mut status = symbol_short!("success");
+
             if current_protocol != symbol_short!("none") {
                 // Get expected balance before withdrawal for verification
                 let expected_withdrawal = Self::get_protocol_balance(&env, &current_protocol);
+                amount_attempted = expected_withdrawal;
 
                 let withdrawn = Self::withdraw_from_protocol(&env, &current_protocol);
+                amount_moved = withdrawn;
 
                 // CRITICAL: Verify complete protocol exit before clearing protocol state
                 if expected_withdrawal > 0 {
@@ -1310,6 +1347,9 @@ impl NeuroWealthVault {
                 RebalanceEvent {
                     protocol,
                     expected_apy,
+                    status,
+                    amount_attempted,
+                    amount_moved,
                 },
             );
         } else {
@@ -2769,18 +2809,20 @@ impl NeuroWealthVault {
         let supplied =
             BlendPoolClient::supply(env, &pool_address, &usdc_token, amount, &vault_address);
 
-        // Update current protocol tracking
-        env.storage()
-            .instance()
-            .set(&DataKey::CurrentProtocol, &symbol_short!("blend"));
+        // Update current protocol tracking only if supply was successful
+        if supplied > 0 {
+            env.storage()
+                .instance()
+                .set(&DataKey::CurrentProtocol, &symbol_short!("blend"));
+        }
 
-        // Emit event for successful supply
+        // Emit event for supply
         env.events().publish(
             (TOPIC_BLEND_SUPPLY,),
             BlendSupplyEvent {
                 asset: usdc_token,
                 amount: supplied,
-                success: true,
+                success: supplied > 0,
             },
         );
 

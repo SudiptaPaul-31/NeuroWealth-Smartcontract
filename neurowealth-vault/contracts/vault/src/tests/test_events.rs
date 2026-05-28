@@ -8,22 +8,28 @@ use crate::{
     TOPIC_BLEND_SUPPLY, TOPIC_BLEND_WITHDRAW, TOPIC_DEPOSIT, TOPIC_EMERGENCY_PAUSED, TOPIC_INIT,
     TOPIC_LIMITS_UPDATED, TOPIC_PAUSED, TOPIC_REBALANCE, TOPIC_UNPAUSED, TOPIC_WITHDRAW,
 };
-use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, TryFromVal};
+use soroban_sdk::{symbol_short, testutils::Address as _, Address, BytesN, Env, TryFromVal};
 
 #[test]
 fn test_initialize_emits_init_event_with_correct_payload() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, NeuroWealthVault);
+    let deployer = Address::generate(&env);
+    let salt = BytesN::from_array(&env, &[0u8; 32]);
+    let contract_id = env
+        .deployer()
+        .with_address(deployer.clone(), salt.clone())
+        .deployed_address();
+    env.register_contract(&contract_id, NeuroWealthVault);
+
     let client = NeuroWealthVaultClient::new(&env, &contract_id);
 
     let agent = Address::generate(&env);
     let owner = Address::generate(&env);
     let usdc_token = Address::generate(&env);
     let expected_tvl_cap = 100_000_000_000_i128;
-    let deployer = Address::generate(&env);
-    client.initialize(&deployer, &owner, &agent, &usdc_token);
+    client.initialize(&deployer, &owner, &agent, &usdc_token, &salt);
 
     let init_events = find_events_by_topic(env.events().all(), &env, TOPIC_INIT);
     assert_eq!(
@@ -363,6 +369,19 @@ fn test_rebalance_emits_rebalance_event_with_correct_payload() {
         event.expected_apy, expected_apy,
         "Event expected_apy should match provided APY"
     );
+    assert_eq!(
+        event.status,
+        symbol_short!("success"),
+        "Event status should be success"
+    );
+    assert_eq!(
+        event.amount_attempted, 0,
+        "Event amount_attempted should be 0"
+    );
+    assert_eq!(
+        event.amount_moved, 0,
+        "Event amount_moved should be 0"
+    );
 }
 
 #[test]
@@ -395,6 +414,111 @@ fn test_rebalance_with_blend_emits_correct_event() {
     assert_eq!(
         event.expected_apy, expected_apy,
         "Event expected_apy should match provided APY"
+    );
+    assert_eq!(
+        event.status,
+        symbol_short!("success"),
+        "Event status should be success"
+    );
+    assert_eq!(
+        event.amount_attempted, 10_000_000_i128,
+        "Event amount_attempted should match vault balance"
+    );
+    assert_eq!(
+        event.amount_moved, 10_000_000_i128,
+        "Event amount_moved should match supplied balance"
+    );
+}
+
+#[test]
+fn test_rebalance_with_blend_partial_fill_emits_correct_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, agent, owner, usdc_token, blend_pool) =
+        setup_vault_with_token_and_blend(&env);
+    let client = NeuroWealthVaultClient::new(&env, &contract_id);
+    let blend_client = MockBlendPoolClient::new(&env, &blend_pool);
+
+    client.set_blend_pool(&owner, &blend_pool);
+
+    // Limit supply to 3M
+    blend_client.set_max_supply_limit(&3_000_000_i128);
+
+    let user = Address::generate(&env);
+    mint_and_deposit(&env, &client, &usdc_token, &user, 10_000_000_i128);
+
+    let expected_apy = 1200_i128;
+    client.rebalance(&symbol_short!("blend"), &expected_apy);
+
+    let rebalance_events =
+        find_events_by_topic(env.events().all(), &env, TOPIC_REBALANCE);
+    let last_event_data = &rebalance_events.last().unwrap().2;
+    let event =
+        RebalanceEvent::try_from_val(&env, last_event_data).expect("Should be a RebalanceEvent");
+    assert_eq!(
+        event.protocol,
+        symbol_short!("blend"),
+        "Event protocol should be blend"
+    );
+    assert_eq!(
+        event.status,
+        symbol_short!("partial"),
+        "Event status should be partial"
+    );
+    assert_eq!(
+        event.amount_attempted, 10_000_000_i128,
+        "Event amount_attempted should be 10M"
+    );
+    assert_eq!(
+        event.amount_moved, 3_000_000_i128,
+        "Event amount_moved should be 3M"
+    );
+}
+
+#[test]
+fn test_rebalance_with_blend_failed_fill_emits_correct_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, agent, owner, usdc_token, blend_pool) =
+        setup_vault_with_token_and_blend(&env);
+    let client = NeuroWealthVaultClient::new(&env, &contract_id);
+    let blend_client = MockBlendPoolClient::new(&env, &blend_pool);
+
+    client.set_blend_pool(&owner, &blend_pool);
+
+    // Limit supply to -1 (simulates complete failure/0 returned)
+    blend_client.set_max_supply_limit(&-1_i128);
+
+    let user = Address::generate(&env);
+    mint_and_deposit(&env, &client, &usdc_token, &user, 10_000_000_i128);
+
+    let expected_apy = 1200_i128;
+    client.rebalance(&symbol_short!("blend"), &expected_apy);
+
+    let rebalance_events =
+        find_events_by_topic(env.events().all(), &env, TOPIC_REBALANCE);
+    let last_event_data = &rebalance_events.last().unwrap().2;
+    let event =
+        RebalanceEvent::try_from_val(&env, last_event_data).expect("Should be a RebalanceEvent");
+    assert_eq!(
+        event.protocol,
+        symbol_short!("blend"),
+        "Event protocol should be blend"
+    );
+    assert_eq!(
+        event.status,
+        symbol_short!("failed"),
+        "Event status should be failed"
+    );
+    assert_eq!(
+        event.amount_attempted, 10_000_000_i128,
+        "Event amount_attempted should be 10M"
+    );
+    assert_eq!(
+        event.amount_moved, 0,
+        "Event amount_moved should be 0"
     );
 }
 

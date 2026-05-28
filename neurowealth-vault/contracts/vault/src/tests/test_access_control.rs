@@ -7,7 +7,7 @@
 //! - Paused-state enforcement on user operations
 
 use super::utils::*;
-use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env};
+use soroban_sdk::{symbol_short, testutils::Address as _, Address, BytesN, Env};
 
 // ============================================================================
 // OWNER-ONLY HAPPY PATHS
@@ -182,13 +182,19 @@ fn test_non_owner_cannot_emergency_pause() {
     env.mock_all_auths();
 
     // Create vault where agent != owner so we can use a true non-owner
-    let contract_id = env.register_contract(None, NeuroWealthVault);
+    let deployer = Address::generate(&env);
+    let salt = BytesN::from_array(&env, &[0u8; 32]);
+    let contract_id = env
+        .deployer()
+        .with_address(deployer.clone(), salt.clone())
+        .deployed_address();
+    env.register_contract(&contract_id, NeuroWealthVault);
+
     let client = NeuroWealthVaultClient::new(&env, &contract_id);
     let agent = Address::generate(&env);
     let owner = Address::generate(&env);
     let usdc_token = Address::generate(&env);
-    let deployer = Address::generate(&env);
-    client.initialize(&deployer, &owner, &agent, &usdc_token);
+    client.initialize(&deployer, &owner, &agent, &usdc_token, &salt);
 
     // owner and agent are distinct; use a fresh address as non-owner
     let non_owner = Address::generate(&env);
@@ -560,3 +566,78 @@ fn test_rebalance_blocked_while_paused() {
     client.pause(&owner);
     client.rebalance(&symbol_short!("none"), &500_i128);
 }
+
+// ============================================================================
+// AGENT CANNOT EXECUTE OWNER-ONLY FUNCTIONS
+// ============================================================================
+
+#[test]
+#[should_panic(expected = "vault: only owner can pause")]
+fn test_agent_cannot_pause() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, agent, _owner, _usdc_token) = setup_vault_with_token(&env);
+    let client = NeuroWealthVaultClient::new(&env, &contract_id);
+
+    // agent is distinct from owner, so this should panic
+    client.pause(&agent);
+}
+
+#[test]
+#[should_panic(expected = "vault: only owner can unpause")]
+fn test_agent_cannot_unpause() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, agent, owner, _usdc_token) = setup_vault_with_token(&env);
+    let client = NeuroWealthVaultClient::new(&env, &contract_id);
+
+    client.pause(&owner);
+    assert!(client.is_paused());
+
+    // agent is distinct from owner, so this should panic
+    client.unpause(&agent);
+}
+
+#[test]
+#[should_panic(expected = "vault: only owner can emergency pause")]
+fn test_agent_cannot_emergency_pause() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, agent, _owner, _usdc_token) = setup_vault_with_token(&env);
+    let client = NeuroWealthVaultClient::new(&env, &contract_id);
+
+    // agent is distinct from owner, so this should panic
+    client.emergency_pause(&agent);
+}
+
+#[test]
+#[should_panic(expected = "vault: only owner can set blend pool")]
+fn test_agent_cannot_set_blend_pool() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, agent, _owner, _usdc_token) = setup_vault_with_token(&env);
+    let client = NeuroWealthVaultClient::new(&env, &contract_id);
+
+    let blend_pool = Address::generate(&env);
+    // agent is distinct from owner, so this should panic
+    client.set_blend_pool(&agent, &blend_pool);
+}
+
+#[test]
+#[should_panic(expected = "vault: caller is not the owner")]
+fn test_agent_cannot_upgrade() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, agent, _owner, _usdc_token) = setup_vault_with_token(&env);
+    let client = NeuroWealthVaultClient::new(&env, &contract_id);
+
+    let fake_wasm_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    // agent is distinct from owner, so this should panic
+    client.upgrade(&agent, &fake_wasm_hash);
+}
+
