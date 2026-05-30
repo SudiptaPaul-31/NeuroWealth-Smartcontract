@@ -1,9 +1,12 @@
 mod test_access_control;
+mod test_auth;
 mod test_blend_integration;
+mod test_checked_arithmetic;
 mod test_deposit;
 mod test_event_schema;
 mod test_events;
 mod test_initialize;
+mod test_inflation_attack;
 mod test_legacy_inline;
 mod test_limits;
 mod test_math_limits;

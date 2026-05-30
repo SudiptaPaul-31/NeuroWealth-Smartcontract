@@ -762,6 +762,27 @@ impl NeuroWealthVault {
     /// - `user.require_auth()` ensures only the user can deposit to their own account
     /// - Checks are performed before state updates (checks-effects-interactions pattern)
     /// - Balance is updated after successful token transfer
+    ///
+    /// # First-Depositor / Donation Inflation Attack
+    /// ERC-4626-style vaults can be vulnerable to a share-price inflation attack
+    /// when the share supply is tiny: an attacker becomes the first depositor for
+    /// a negligible amount, "donates" a large amount to inflate the price per
+    /// share, and a subsequent victim deposit rounds down to zero shares —
+    /// letting the attacker redeem the victim's funds.
+    ///
+    /// This vault mitigates the attack without virtual shares by combining three
+    /// properties (see also [`Self::convert_to_shares_internal`]):
+    /// 1. **Storage-based asset accounting.** Share pricing uses the stored
+    ///    `TotalAssets`, which only changes via deposit, withdraw, and the
+    ///    agent's balance-verified `update_total_assets`. A direct token transfer
+    ///    ("donation") to the vault address does NOT change `TotalAssets`, so it
+    ///    cannot inflate the share price. This neutralizes the donation step.
+    /// 2. **Minimum deposit floor.** `MinDeposit` (default 1_000_000 base units)
+    ///    prevents a 1-unit first deposit, so the share supply is never small
+    ///    enough for rounding to be weaponized.
+    /// 3. **Non-zero mint guard.** A deposit that would mint zero shares reverts
+    ///    (`vault: shares to mint must be positive`), so a victim can never
+    ///    silently receive 0 shares for a non-zero deposit.
     pub fn deposit(env: Env, user: Address, amount: i128) {
         Self::require_initialized(&env);
         user.require_auth();
@@ -802,7 +823,11 @@ impl NeuroWealthVault {
                 .expect("vault: total deposits overflow")),
         );
 
-        // Mint shares based on current share price and update total assets
+        // Mint shares based on current share price and update total assets.
+        // Inflation-attack mitigation: reject any deposit that would round down
+        // to zero shares. Together with storage-based asset accounting (donations
+        // can't move the price) and the minimum-deposit floor, this defeats the
+        // first-depositor/donation inflation attack. See `deposit` docs.
         let shares_to_mint = Self::convert_to_shares_internal(&env, amount);
         assert!(shares_to_mint > 0, "vault: shares to mint must be positive");
 
@@ -2057,8 +2082,13 @@ impl NeuroWealthVault {
             // max_decrease_bps is in basis points (1/100 of 1%)
             // Default 1000 bps = 10% maximum decrease per call
             let max_decrease_bps = max_decrease_bps.max(100); // Minimum 1% bound
-            let max_decrease = old_total * (max_decrease_bps as i128) / 10_000;
-            let actual_decrease = old_total - new_total;
+            let max_decrease = old_total
+                .checked_mul(max_decrease_bps as i128)
+                .expect("vault: max decrease mul overflow")
+                / 10_000;
+            let actual_decrease = old_total
+                .checked_sub(new_total)
+                .expect("vault: decrease underflow");
 
             assert!(
                 actual_decrease <= max_decrease,
@@ -2092,7 +2122,9 @@ impl NeuroWealthVault {
                 &usdc_token,
                 &env.current_contract_address(),
             );
-            total_available += deployed_balance;
+            total_available = total_available
+                .checked_add(deployed_balance)
+                .expect("vault: total available overflow");
         }
 
         assert!(
@@ -2515,7 +2547,7 @@ impl NeuroWealthVault {
             env.storage().instance().has(&DataKey::Agent)
                 && env.storage().instance().has(&DataKey::UsdcToken)
                 && env.storage().instance().has(&DataKey::Owner),
-            "vault: not initialized"
+            "vault: not initialized."
         );
     }
 
@@ -2674,6 +2706,16 @@ impl NeuroWealthVault {
 
     /// Internal helper: convert assets (USDC) to shares using current totals.
     /// Uses floor division - safe for deposits (user gets fewer shares, vault benefits).
+    ///
+    /// # Inflation-attack note
+    /// Pricing reads the stored `TotalAssets` (see [`Self::get_total_assets_internal`]),
+    /// NOT the vault's live token balance. Direct "donations" (token transfers to
+    /// the vault that bypass `deposit`) therefore do not move the share price, so
+    /// the classic first-depositor/donation inflation attack does not apply here.
+    /// Virtual-share / dead-share offsets (common mitigations for balance-based
+    /// vaults) are unnecessary as a result. The `deposit` entrypoint additionally
+    /// rejects zero-share mints and enforces a minimum deposit; see [`Self::deposit`]
+    /// for the full mitigation rationale.
     #[inline]
     fn convert_to_shares_internal(env: &Env, assets: i128) -> i128 {
         if assets == 0 {
@@ -2715,8 +2757,15 @@ impl NeuroWealthVault {
             // Ceiling division: (a + b - 1) / b
             // shares = ceil(assets * total_shares / total_assets)
             let product = assets.checked_mul(total_shares).expect("vault: conversion mul overflow");
-            // Safe addition: total_assets >= 1 in this branch, so (product + total_assets - 1) won't overflow if product didn't
-            let numerator = product.checked_add(total_assets - 1).expect("vault: conversion add overflow");
+            // total_assets >= 1 in this branch, so the subtraction cannot underflow;
+            // use checked ops throughout for a consistent, explicit failure mode.
+            let numerator = product
+                .checked_add(
+                    total_assets
+                        .checked_sub(1)
+                        .expect("vault: conversion sub underflow"),
+                )
+                .expect("vault: conversion add overflow");
             numerator.checked_div(total_assets).expect("vault: conversion div error")
         }
     }
