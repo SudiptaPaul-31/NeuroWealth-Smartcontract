@@ -236,12 +236,25 @@ pub struct RebalanceEvent {
     pub protocol: Symbol,
     /// Expected APY in basis points (e.g., 850 = 8.5%)
     pub expected_apy: i128,
-    /// Status of the rebalance operation ("success", "failed", "partial")
+    /// Status: "success", "failed", "partial", or "noop" (no funds moved)
     pub status: Symbol,
     /// Amount attempted to be moved
     pub amount_attempted: i128,
     /// Amount actually moved
     pub amount_moved: i128,
+}
+
+/// Emitted when [`DataKey::CurrentProtocol`] changes.
+///
+/// Indexers should prefer this event over inferring protocol from rebalance
+/// events alone.
+///
+/// # Topics
+/// - `SymbolShort("proto_chg")` - Event identifier
+#[contracttype]
+pub struct ProtocolChangedEvent {
+    pub old_protocol: Symbol,
+    pub new_protocol: Symbol,
 }
 
 /// Emitted when the vault is paused or unpaused.
@@ -451,16 +464,15 @@ pub struct UserInfo {
 // BLEND POOL CLIENT INTERFACE
 // ============================================================================
 
-/// Helper functions for interacting with Blend pool contract.
+/// Helper functions for interacting with Blend Protocol v2 pool contract.
 ///
-/// Based on Blend's official interface documentation:
-/// - https://docs.rs/blend-interfaces/0.0.1/blend_interfaces/pool/trait.Pool.html
-/// - https://docs.blend.capital/tech-docs/core-contracts/lending-pool
+/// Production Blend Soroban pools use request-based fund management:
+/// - `submit_with_allowance(from, spender, to, requests)` — supply with token allowance
+/// - `submit(from, to, requests)` — withdraw (request type 1)
+/// - `balance(asset, user)` — supplied balance for the vault position
 ///
-/// Function names based on blend-interfaces crate:
-/// - `deposit` - Supplies assets to the pool
-/// - `redeem` - Withdraws assets from the pool
-/// - `get_user_reserve_data` - Gets user's reserve data including balance
+/// See `BLEND_INTEGRATION_RESEARCH.md` and
+/// https://docs.blend.capital/tech-docs/core-contracts/lending-pool/fund-management
 struct BlendPoolClient;
 
 #[derive(Clone)]
@@ -472,6 +484,7 @@ struct BlendRequest {
 }
 
 const BLEND_REQUEST_TYPE_SUPPLY: u32 = 0;
+const BLEND_REQUEST_TYPE_WITHDRAW: u32 = 1;
 #[allow(dead_code)]
 const DEFAULT_TVL_CAP: i128 = 100_000_000_000_i128;
 const DEFAULT_USER_DEPOSIT_CAP: i128 = 10_000_000_000_i128;
@@ -497,6 +510,7 @@ pub(crate) const TOPIC_ASSETS_UPDATED: Symbol = symbol_short!("assets");
 pub(crate) const TOPIC_UPGRADED: Symbol = symbol_short!("upgraded");
 pub(crate) const TOPIC_BLEND_SUPPLY: Symbol = symbol_short!("blend_sup");
 pub(crate) const TOPIC_BLEND_WITHDRAW: Symbol = symbol_short!("blend_wd");
+pub(crate) const TOPIC_PROTOCOL_CHANGED: Symbol = symbol_short!("proto_chg");
 
 impl BlendPoolClient {
     /// Deposits assets to the Blend pool.
@@ -580,7 +594,7 @@ impl BlendPoolClient {
 
         // Create withdraw request (type 1 = withdraw)
         let request = BlendRequest {
-            request_type: 1, // Withdraw request type
+            request_type: BLEND_REQUEST_TYPE_WITHDRAW,
             address: asset.clone(),
             amount,
         };
@@ -960,7 +974,7 @@ impl NeuroWealthVault {
 
                 // Attempt to withdraw from Blend
                 // If this returns less than needed, we will reconcile below
-                let _withdrawn = Self::withdraw_from_blend(&env, needed);
+                let _withdrawn = Self::withdraw_from_blend(&env, needed, 0);
 
                 // RECONCILIATION: Check actual available USDC after Blend withdrawal.
                 // We cap the withdrawal to what the vault actually has available.
@@ -1152,7 +1166,7 @@ impl NeuroWealthVault {
                 let needed = entitled_amount
                     .checked_sub(vault_balance)
                     .expect("vault: math error");
-                let _ = Self::withdraw_from_blend(&env, needed);
+                let _ = Self::withdraw_from_blend(&env, needed, 0);
 
                 // RECONCILIATION: Check actual available USDC after potential Blend withdrawal
                 let available_usdc = token_client.balance(&env.current_contract_address());
@@ -1261,6 +1275,8 @@ impl NeuroWealthVault {
     /// * `env` - The Soroban environment
     /// * `protocol` - The target protocol symbol. Supported values: "blend", "none"
     /// * `expected_apy` - Expected APY in basis points (e.g., 850 = 8.5%)
+    /// * `min_out` - Minimum assets that must be received on each supply/withdraw leg;
+    ///   pass `0` to disable slippage protection (breaking change vs. earlier two-arg API)
     ///
     /// # Returns
     /// Nothing. This function triggers rebalancing and returns nothing.
@@ -1269,21 +1285,29 @@ impl NeuroWealthVault {
     /// - If the vault is paused
     /// - If the caller is not the authorized agent
     /// - If Blend pool is not configured and protocol is "blend"
+    /// - If a leg moves fewer assets than `min_out` when `min_out > 0`
     ///
     /// # Events
-    /// Emits `RebalanceEvent` with:
-    /// - `protocol`: The target protocol
-    /// - `expected_apy`: Expected APY in basis points
+    /// Emits `RebalanceEvent` (status `"noop"` when no funds move) and
+    /// `ProtocolChangedEvent` when [`DataKey::CurrentProtocol`] updates.
+    ///
+    /// # Agent expectations (off-chain)
+    /// - `status == "noop"`: vault already at target allocation; no pool calls needed
+    /// - `ProtocolChangedEvent`: authoritative protocol transition for indexers
     ///
     /// # Security
     /// - `agent.require_auth()` ensures only the authorized AI agent can rebalance
     /// - Agent is set during initialization and can be updated by owner
     /// - Funds are moved on-chain via cross-contract calls
     /// - Errors in protocol calls are handled gracefully to prevent fund lockup
-    pub fn rebalance(env: Env, protocol: Symbol, expected_apy: i128) {
+    pub fn rebalance(env: Env, protocol: Symbol, expected_apy: i128, min_out: i128) {
         Self::require_initialized(&env);
         Self::require_not_paused(&env);
         Self::require_is_agent(&env);
+
+        if min_out < 0 {
+            panic!("vault: min_out must be non-negative");
+        }
 
         // Validate protocol against allowlist
         let supported_protocols = vec![&env, symbol_short!("blend"), symbol_short!("none")];
@@ -1297,16 +1321,17 @@ impl NeuroWealthVault {
             .get(&DataKey::CurrentProtocol)
             .unwrap_or(symbol_short!("none"));
 
+        let mut amount_attempted = 0_i128;
+        let mut amount_moved = 0_i128;
+
         // If switching protocols, withdraw from current protocol first
         if current_protocol != protocol && current_protocol != symbol_short!("none") {
-            // Get expected balance before withdrawal for verification
             let expected_withdrawal = Self::get_protocol_balance(&env, &current_protocol);
+            amount_attempted = amount_attempted.saturating_add(expected_withdrawal);
 
-            let withdrawn = Self::withdraw_from_protocol(&env, &current_protocol);
+            let withdrawn = Self::withdraw_from_protocol(&env, &current_protocol, min_out);
+            amount_moved = amount_moved.saturating_add(withdrawn);
 
-            // CRITICAL: Verify complete protocol exit before proceeding
-            // Check that: (1) we withdrew what was expected, AND (2) protocol balance is now 0
-            // This prevents partial transitions where funds get stuck in the old protocol
             if expected_withdrawal > 0 {
                 assert!(
                     withdrawn >= expected_withdrawal,
@@ -1315,7 +1340,6 @@ impl NeuroWealthVault {
                     withdrawn
                 );
 
-                // Double-check that protocol balance is actually 0
                 let remaining_balance = Self::get_protocol_balance(&env, &current_protocol);
                 assert!(
                     remaining_balance == 0,
@@ -1325,7 +1349,6 @@ impl NeuroWealthVault {
             }
         }
 
-        // Supply to new protocol if switching to Blend
         if protocol == symbol_short!("blend") {
             if !env.storage().instance().has(&DataKey::BlendPool) {
                 panic!("vault: blend pool not configured");
@@ -1335,24 +1358,20 @@ impl NeuroWealthVault {
             let token_client = token::Client::new(&env, &usdc_token);
             let vault_balance = token_client.balance(&env.current_contract_address());
 
-            let mut amount_attempted = 0;
-            let mut amount_moved = 0;
             let mut status = symbol_short!("success");
 
             if vault_balance > 0 {
-                amount_attempted = vault_balance;
-                let supplied = Self::supply_to_blend(&env, vault_balance);
-                amount_moved = supplied;
-
-                if supplied > 0 {
-                    let _total_assets = Self::get_total_assets_internal(&env);
-                }
+                amount_attempted = amount_attempted.saturating_add(vault_balance);
+                let supplied = Self::supply_to_blend(&env, vault_balance, min_out);
+                amount_moved = amount_moved.saturating_add(supplied);
 
                 if supplied == 0 {
                     status = symbol_short!("failed");
                 } else if supplied < vault_balance {
                     status = symbol_short!("partial");
                 }
+            } else if amount_moved == 0 {
+                status = symbol_short!("noop");
             }
 
             env.events().publish(
@@ -1366,19 +1385,15 @@ impl NeuroWealthVault {
                 },
             );
         } else if protocol == symbol_short!("none") {
-            let mut amount_attempted = 0;
-            let mut amount_moved = 0;
-            let status = symbol_short!("success");
+            let mut status = symbol_short!("success");
 
             if current_protocol != symbol_short!("none") {
-                // Get expected balance before withdrawal for verification
                 let expected_withdrawal = Self::get_protocol_balance(&env, &current_protocol);
-                amount_attempted = expected_withdrawal;
+                amount_attempted = amount_attempted.saturating_add(expected_withdrawal);
 
-                let withdrawn = Self::withdraw_from_protocol(&env, &current_protocol);
-                amount_moved = withdrawn;
+                let withdrawn = Self::withdraw_from_protocol(&env, &current_protocol, min_out);
+                amount_moved = amount_moved.saturating_add(withdrawn);
 
-                // CRITICAL: Verify complete protocol exit before clearing protocol state
                 if expected_withdrawal > 0 {
                     assert!(
                         withdrawn >= expected_withdrawal,
@@ -1387,7 +1402,6 @@ impl NeuroWealthVault {
                         withdrawn
                     );
 
-                    // Double-check that protocol balance is actually 0
                     let remaining_balance = Self::get_protocol_balance(&env, &current_protocol);
                     assert!(
                         remaining_balance == 0,
@@ -1395,10 +1409,11 @@ impl NeuroWealthVault {
                         remaining_balance
                     );
                 }
+                Self::set_current_protocol(&env, symbol_short!("none"));
+            } else if amount_moved == 0 {
+                status = symbol_short!("noop");
             }
-            env.storage()
-                .instance()
-                .set(&DataKey::CurrentProtocol, &symbol_short!("none"));
+
             env.events().publish(
                 (TOPIC_REBALANCE,),
                 RebalanceEvent {
@@ -2954,6 +2969,41 @@ impl NeuroWealthVault {
         }
     }
 
+    /// Updates [`DataKey::CurrentProtocol`] and emits [`ProtocolChangedEvent`] on change.
+    fn set_current_protocol(env: &Env, new_protocol: Symbol) {
+        let old_protocol: Symbol = env
+            .storage()
+            .instance()
+            .get(&DataKey::CurrentProtocol)
+            .unwrap_or(symbol_short!("none"));
+
+        if old_protocol == new_protocol {
+            return;
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::CurrentProtocol, &new_protocol);
+
+        env.events().publish(
+            (TOPIC_PROTOCOL_CHANGED,),
+            ProtocolChangedEvent {
+                old_protocol,
+                new_protocol,
+            },
+        );
+    }
+
+    /// Panics when `min_out > 0` and fewer assets were received than required.
+    fn require_min_out(actual: i128, min_out: i128, leg: &str) {
+        if min_out > 0 && actual < min_out {
+            panic!(
+                "vault: {} received {} below min_out {}",
+                leg, actual, min_out
+            );
+        }
+    }
+
     /// Internal helper: Supplies USDC to the Blend pool.
     ///
     /// This function handles the cross-contract call to Blend's supply function.
@@ -2962,6 +3012,7 @@ impl NeuroWealthVault {
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `amount` - Amount of USDC to supply
+    /// * `min_out` - Minimum amount that must be supplied (0 = no check)
     ///
     /// # Returns
     /// The amount actually supplied (may be less than requested)
@@ -2970,7 +3021,7 @@ impl NeuroWealthVault {
     /// - Returns 0 if amount <= 0
     /// - Panics if Blend pool address is not configured
     /// - Emits BlendSupplyEvent with success status
-    fn supply_to_blend(env: &Env, amount: i128) -> i128 {
+    fn supply_to_blend(env: &Env, amount: i128, min_out: i128) -> i128 {
         if amount <= 0 {
             return 0;
         }
@@ -3058,11 +3109,10 @@ impl NeuroWealthVault {
         let supplied =
             BlendPoolClient::supply(env, &pool_address, &usdc_token, amount, &vault_address);
 
-        // Update current protocol tracking only if supply was successful
+        Self::require_min_out(supplied, min_out, "blend supply");
+
         if supplied > 0 {
-            env.storage()
-                .instance()
-                .set(&DataKey::CurrentProtocol, &symbol_short!("blend"));
+            Self::set_current_protocol(env, symbol_short!("blend"));
         }
 
         // Emit event for supply
@@ -3085,6 +3135,7 @@ impl NeuroWealthVault {
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `amount` - Amount of USDC to withdraw (0 = withdraw all)
+    /// * `min_out` - Minimum amount that must be withdrawn (0 = no check)
     ///
     /// # Returns
     /// The amount actually withdrawn
@@ -3093,7 +3144,7 @@ impl NeuroWealthVault {
     /// - Returns 0 if amount_to_withdraw <= 0
     /// - Panics if Blend pool address is not configured
     /// - Emits BlendWithdrawEvent with success status and actual amount received
-    fn withdraw_from_blend(env: &Env, amount: i128) -> i128 {
+    fn withdraw_from_blend(env: &Env, amount: i128, min_out: i128) -> i128 {
         let pool_address: Address = env
             .storage()
             .instance()
@@ -3125,15 +3176,13 @@ impl NeuroWealthVault {
             &vault_address,
         );
 
-        // Update current protocol tracking if fully withdrawn
+        Self::require_min_out(withdrawn, min_out, "blend withdraw");
+
         if withdrawn > 0 && amount == 0 {
-            // Check if balance is now zero
             let remaining =
                 BlendPoolClient::get_balance(env, &pool_address, &usdc_token, &vault_address);
             if remaining == 0 {
-                env.storage()
-                    .instance()
-                    .set(&DataKey::CurrentProtocol, &symbol_short!("none"));
+                Self::set_current_protocol(env, symbol_short!("none"));
             }
         }
 
@@ -3161,7 +3210,7 @@ impl NeuroWealthVault {
     ///
     /// # Returns
     /// The amount withdrawn, or 0 if no funds were deployed to that protocol
-    fn withdraw_from_protocol(env: &Env, protocol: &Symbol) -> i128 {
+    fn withdraw_from_protocol(env: &Env, protocol: &Symbol, min_out: i128) -> i128 {
         let current_protocol: Symbol = env
             .storage()
             .instance()
@@ -3169,8 +3218,7 @@ impl NeuroWealthVault {
             .unwrap_or(symbol_short!("none"));
 
         if current_protocol == *protocol && *protocol == symbol_short!("blend") {
-            // Withdraw all funds from Blend
-            Self::withdraw_from_blend(env, 0)
+            Self::withdraw_from_blend(env, 0, min_out)
         } else {
             0
         }

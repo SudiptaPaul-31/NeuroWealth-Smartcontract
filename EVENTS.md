@@ -102,16 +102,35 @@ Emitted when the AI agent rebalances funds between yield strategies.
 pub struct RebalanceEvent {
     pub protocol: Symbol,         // Target protocol ("blend", "none")
     pub expected_apy: i128,       // Expected APY in basis points (850 = 8.5%)
-    pub status: Symbol,           // Status ("success", "failed", "partial")
+    pub status: Symbol,           // "success", "failed", "partial", or "noop"
     pub amount_attempted: i128,   // Amount attempted to be moved
     pub amount_moved: i128,       // Amount actually moved
 }
 ```
 
+**Agent / indexer notes:**
+- `"noop"`: target allocation already satisfied; no supply/withdraw leg ran (e.g. rebalance to Blend with zero idle USDC while already deployed).
+- Prefer `ProtocolChangedEvent` for authoritative protocol transitions (see below).
+
 **Usage:**
 - AI agents track rebalancing decisions
 - Frontend displays current strategy allocation
 - Indexers monitor strategy changes for risk analysis
+
+### 4a. ProtocolChangedEvent
+**Topic:** `"proto_chg"`
+
+Emitted when `CurrentProtocol` storage changes (supply to Blend, full withdraw, or explicit transition to `"none"`).
+
+```rust
+pub struct ProtocolChangedEvent {
+    pub old_protocol: Symbol,
+    pub new_protocol: Symbol,
+}
+```
+
+**Usage:**
+- Indexers record explicit protocol state transitions without inferring from rebalance events alone
 
 ## Administrative Events
 

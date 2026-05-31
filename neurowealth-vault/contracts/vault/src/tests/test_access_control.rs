@@ -243,7 +243,7 @@ fn test_agent_can_rebalance() {
     let client = NeuroWealthVaultClient::new(&env, &contract_id);
 
     // "none" protocol is always safe — no external pool required
-    client.rebalance(&symbol_short!("none"), &500_i128);
+    client.rebalance(&symbol_short!("none"), &500_i128, &0_i128);
 
     assert_eq!(
         client.get_current_protocol(),
@@ -564,7 +564,7 @@ fn test_rebalance_blocked_while_paused() {
     let client = NeuroWealthVaultClient::new(&env, &contract_id);
 
     client.pause(&owner);
-    client.rebalance(&symbol_short!("none"), &500_i128);
+    client.rebalance(&symbol_short!("none"), &500_i128, &0_i128);
 }
 
 // ============================================================================

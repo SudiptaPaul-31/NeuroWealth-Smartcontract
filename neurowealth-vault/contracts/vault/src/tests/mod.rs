@@ -14,6 +14,8 @@ mod test_math_limits;
 mod test_pause;
 mod test_rebalance;
 mod test_rebalance_integration;
+#[cfg(feature = "blend-devnet")]
+mod test_blend_devnet;
 mod test_rounding_math;
 mod test_shares;
 mod test_withdraw;
