@@ -10,12 +10,12 @@ use super::utils::*;
 use crate::{
     AgentUpdatedEvent, AssetsUpdatedEvent, BlendSupplyEvent, BlendWithdrawEvent, DepositEvent,
     EmergencyPausedEvent, LimitsUpdatedEvent, OwnershipTransferInitiatedEvent,
-    OwnershipTransferredEvent, RebalanceEvent, TvlCapUpdatedEvent, UserDepositCapUpdatedEvent,
-    VaultInitializedEvent, VaultPausedEvent, VaultUnpausedEvent, WithdrawEvent,
-    TOPIC_AGENT_UPDATED, TOPIC_ASSETS_UPDATED, TOPIC_BLEND_SUPPLY, TOPIC_BLEND_WITHDRAW,
-    TOPIC_DEPOSIT, TOPIC_EMERGENCY_PAUSED, TOPIC_INIT, TOPIC_LIMITS_UPDATED,
-    TOPIC_OWNERSHIP_INITIATED, TOPIC_OWNERSHIP_TRANSFERRED, TOPIC_PAUSED, TOPIC_REBALANCE,
-    TOPIC_TVL_CAP_UPDATED, TOPIC_UNPAUSED, TOPIC_USER_CAP_UPDATED, TOPIC_WITHDRAW,
+    OwnershipTransferredEvent, ProtocolChangedEvent, RebalanceEvent, TvlCapUpdatedEvent,
+    UserDepositCapUpdatedEvent, VaultInitializedEvent, VaultPausedEvent, VaultUnpausedEvent,
+    WithdrawEvent, TOPIC_AGENT_UPDATED, TOPIC_ASSETS_UPDATED, TOPIC_BLEND_SUPPLY,
+    TOPIC_BLEND_WITHDRAW, TOPIC_DEPOSIT, TOPIC_EMERGENCY_PAUSED, TOPIC_INIT, TOPIC_LIMITS_UPDATED,
+    TOPIC_OWNERSHIP_INITIATED, TOPIC_OWNERSHIP_TRANSFERRED, TOPIC_PAUSED, TOPIC_PROTOCOL_CHANGED,
+    TOPIC_REBALANCE, TOPIC_TVL_CAP_UPDATED, TOPIC_UNPAUSED, TOPIC_USER_CAP_UPDATED, TOPIC_WITHDRAW,
 };
 use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, TryFromVal};
 
@@ -191,7 +191,7 @@ fn test_event_schema_rebalance_events() {
     // Test rebalance event
     let protocol = symbol_short!("none");
     let expected_apy = 850_i128;
-    client.rebalance(&protocol, &expected_apy);
+    client.rebalance(&protocol, &expected_apy, &0_i128);
 
     let rebalance_events = find_events_by_topic(env.events().all(), &env, TOPIC_REBALANCE);
     assert_eq!(
@@ -207,9 +207,57 @@ fn test_event_schema_rebalance_events() {
     // Verify payload structure
     assert_eq!(rebalance_event.protocol, protocol);
     assert_eq!(rebalance_event.expected_apy, expected_apy);
-    assert_eq!(rebalance_event.status, symbol_short!("success"));
+    assert_eq!(rebalance_event.status, symbol_short!("noop"));
     assert_eq!(rebalance_event.amount_attempted, 0);
     assert_eq!(rebalance_event.amount_moved, 0);
+}
+
+/// ProtocolChangedEvent is emitted when CurrentProtocol updates (#149).
+#[test]
+fn test_event_schema_protocol_changed_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, _agent, owner, usdc_token, blend_pool) =
+        setup_vault_with_token_and_blend(&env);
+    let client = NeuroWealthVaultClient::new(&env, &contract_id);
+
+    client.set_blend_pool(&owner, &blend_pool);
+
+    let user = Address::generate(&env);
+    mint_and_deposit(&env, &client, &usdc_token, &user, 10_000_000_i128);
+
+    client.rebalance(&symbol_short!("blend"), &1200_i128, &0_i128);
+
+    let proto_events =
+        find_events_by_topic(env.events().all(), &env, TOPIC_PROTOCOL_CHANGED);
+    assert_eq!(
+        proto_events.len(),
+        1,
+        "Exactly one protocol changed event should be emitted"
+    );
+
+    let (_, _, data) = &proto_events[0];
+    let proto_event = ProtocolChangedEvent::try_from_val(&env, data)
+        .expect("Should be a valid ProtocolChangedEvent");
+    assert_eq!(proto_event.old_protocol, symbol_short!("none"));
+    assert_eq!(proto_event.new_protocol, symbol_short!("blend"));
+
+    client.rebalance(&symbol_short!("none"), &500_i128, &0_i128);
+
+    let proto_events =
+        find_events_by_topic(env.events().all(), &env, TOPIC_PROTOCOL_CHANGED);
+    assert_eq!(
+        proto_events.len(),
+        2,
+        "Second transition should emit another protocol changed event"
+    );
+
+    let (_, _, data) = &proto_events[1];
+    let proto_event = ProtocolChangedEvent::try_from_val(&env, data)
+        .expect("Should be a valid ProtocolChangedEvent");
+    assert_eq!(proto_event.old_protocol, symbol_short!("blend"));
+    assert_eq!(proto_event.new_protocol, symbol_short!("none"));
 }
 
 /// Test that ownership transfer events have correct topics and payload structure
@@ -364,7 +412,7 @@ fn test_event_schema_blend_events() {
     mint_and_deposit(&env, &client, &usdc_token, &user, 10_000_000_i128);
 
     // Test rebalance to blend (should emit BlendSupplyEvent)
-    client.rebalance(&symbol_short!("blend"), &1200_i128);
+    client.rebalance(&symbol_short!("blend"), &1200_i128, &0_i128);
 
     let supply_events = find_events_by_topic(env.events().all(), &env, TOPIC_BLEND_SUPPLY);
     assert_eq!(
@@ -383,7 +431,7 @@ fn test_event_schema_blend_events() {
     assert!(supply_event.success);
 
     // Test rebalance back to none (should emit BlendWithdrawEvent)
-    client.rebalance(&symbol_short!("none"), &500_i128);
+    client.rebalance(&symbol_short!("none"), &500_i128, &0_i128);
 
     let withdraw_events = find_events_by_topic(env.events().all(), &env, TOPIC_BLEND_WITHDRAW);
     assert_eq!(
