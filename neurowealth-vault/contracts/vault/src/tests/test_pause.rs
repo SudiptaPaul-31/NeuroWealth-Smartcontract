@@ -51,7 +51,7 @@ fn test_owner_can_emergency_pause() {
 }
 
 #[test]
-#[should_panic(expected = "vault: only owner can unpause")]
+#[should_panic(expected = "Error(Contract, #20)")]
 fn test_non_owner_cannot_unpause() {
     let env = Env::default();
     env.mock_all_auths();
@@ -74,17 +74,17 @@ fn test_unauthorized_users_cannot_pause() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (contract_id, _agent, _owner, _usdc_token) = setup_vault_with_token(&env);
+    let (contract_id, _agent, owner, _usdc_token) = setup_vault_with_token(&env);
     let client = NeuroWealthVaultClient::new(&env, &contract_id);
-
     let unauthorized = Address::generate(&env);
 
+    client.emergency_pause(&owner);
     // Fails because unauthorized != stored_owner
     client.pause(&unauthorized);
 }
 
 #[test]
-#[should_panic(expected = "vault: paused")]
+#[should_panic(expected = "Error(Contract, #35)")]
 fn test_deposit_blocked_while_paused() {
     let env = Env::default();
     env.mock_all_auths();
@@ -104,7 +104,7 @@ fn test_deposit_blocked_while_paused() {
 }
 
 #[test]
-#[should_panic(expected = "vault: paused")]
+#[should_panic(expected = "Error(Contract, #35)")]
 fn test_withdraw_blocked_while_paused() {
     let env = Env::default();
     env.mock_all_auths();
@@ -125,7 +125,7 @@ fn test_withdraw_blocked_while_paused() {
 }
 
 #[test]
-#[should_panic(expected = "vault: paused")]
+#[should_panic(expected = "Error(Contract, #35)")]
 fn test_rebalance_blocked_while_paused() {
     let env = Env::default();
     env.mock_all_auths();
@@ -137,7 +137,7 @@ fn test_rebalance_blocked_while_paused() {
     assert!(client.is_paused());
 
     // require_not_paused fires before any blend check
-    client.rebalance(&soroban_sdk::symbol_short!("blend"), &500_i128);
+    client.rebalance(&soroban_sdk::symbol_short!("blend"), &500_i128, &0_i128);
 }
 
 #[test]

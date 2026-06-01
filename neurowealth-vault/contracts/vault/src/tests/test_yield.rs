@@ -22,13 +22,13 @@ fn test_agent_can_update_total_assets() {
     token_client.mint(&contract_id, &yield_amount);
 
     let new_total = deposit_amount + yield_amount;
-    client.update_total_assets(&agent, &new_total);
+    client.update_total_assets(&agent, &new_total, &false, &0);
 
     assert_eq!(client.get_total_assets(), new_total);
 }
 
 #[test]
-#[should_panic(expected = "vault: only agent can update total assets")]
+#[should_panic(expected = "Error(Contract, #30)")]
 fn test_non_agent_cannot_update_total_assets() {
     let env = Env::default();
     env.mock_all_auths();
@@ -42,7 +42,7 @@ fn test_non_agent_cannot_update_total_assets() {
 
     let non_agent = Address::generate(&env);
     // update_total_assets asserts agent == stored_agent before anything else
-    client.update_total_assets(&non_agent, &deposit_amount);
+    client.update_total_assets(&non_agent, &deposit_amount, &false, &0);
 }
 
 #[test]
@@ -65,7 +65,7 @@ fn test_yield_increases_user_asset_balance() {
     let yield_amount = deposit_amount / 2;
     let new_total_assets = deposit_amount + yield_amount;
     token_client.mint(&contract_id, &yield_amount);
-    client.update_total_assets(&agent, &new_total_assets);
+    client.update_total_assets(&agent, &new_total_assets, &false, &0);
 
     let balance_after_yield = client.get_balance(&user);
     assert!(
@@ -101,7 +101,7 @@ fn test_yield_distributed_proportionally_between_users() {
     let yield_amount = total_deposits / 2;
     let new_total_assets = total_deposits + yield_amount;
     token_client.mint(&contract_id, &yield_amount);
-    client.update_total_assets(&agent, &new_total_assets);
+    client.update_total_assets(&agent, &new_total_assets, &false, &0);
 
     let balance1_after = client.get_balance(&user1);
     let balance2_after = client.get_balance(&user2);
@@ -144,7 +144,7 @@ fn test_yield_emits_event() {
     let yield_amount = 5_000_000_i128;
     let new_total = deposit_amount + yield_amount;
     token_client.mint(&contract_id, &yield_amount);
-    client.update_total_assets(&agent, &new_total);
+    client.update_total_assets(&agent, &new_total, &false, &0);
 
     let assets_events = find_events_by_topic(
         env.events().all(),
@@ -155,4 +155,89 @@ fn test_yield_emits_event() {
         !assets_events.is_empty(),
         "Assets update should emit an event"
     );
+}
+
+// ============================================================================
+// LOSS REPORTING — ALLOWED DECREASE
+// ============================================================================
+
+/// Agent + owner both present: a decrease within the cap succeeds and the new
+/// (lower) total is persisted.
+#[test]
+fn test_decrease_allowed_with_owner_cosign_within_cap() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, agent, _owner, usdc_token) = setup_vault_with_token(&env);
+    let client = NeuroWealthVaultClient::new(&env, &contract_id);
+
+    let user = Address::generate(&env);
+    let deposit_amount = 10_000_000_i128; // 10 USDC
+    mint_and_deposit(&env, &client, &usdc_token, &user, deposit_amount);
+
+    // Loss of 5% — within default 10% cap.
+    let loss_amount = 500_000_i128; // 0.5 USDC
+    let new_total = deposit_amount - loss_amount;
+    client.update_total_assets(&agent, &new_total, &true, &1000);
+
+    assert_eq!(client.get_total_assets(), new_total);
+}
+
+/// Decrease is capped per-call: 10 % of 10 USDC = 1 USDC max. A 20 % loss in
+/// one call must be rejected.
+#[test]
+#[should_panic(expected = "Error(Contract, #32)")]
+fn test_decrease_blocked_exceeding_cap() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, agent, _owner, usdc_token) = setup_vault_with_token(&env);
+    let client = NeuroWealthVaultClient::new(&env, &contract_id);
+
+    let user = Address::generate(&env);
+    let deposit_amount = 10_000_000_i128;
+    mint_and_deposit(&env, &client, &usdc_token, &user, deposit_amount);
+
+    // 20% loss (2 USDC) with a 10% cap (1000 bps) — must panic.
+    let new_total = deposit_amount - 2_000_000_i128;
+    client.update_total_assets(&agent, &new_total, &true, &1000);
+}
+
+/// Passing allow_decrease=false while new_total < old_total must always panic,
+/// regardless of whether the owner is present.
+#[test]
+#[should_panic(expected = "Error(Contract, #31)")]
+fn test_decrease_blocked_without_allow_decrease_flag() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, agent, _owner, usdc_token) = setup_vault_with_token(&env);
+    let client = NeuroWealthVaultClient::new(&env, &contract_id);
+
+    let user = Address::generate(&env);
+    let deposit_amount = 10_000_000_i128;
+    mint_and_deposit(&env, &client, &usdc_token, &user, deposit_amount);
+
+    // allow_decrease=false but new_total is lower — must panic.
+    let new_total = deposit_amount - 500_000_i128;
+    client.update_total_assets(&agent, &new_total, &false, &1000);
+}
+
+/// A same-value update (new_total == old_total) is an increase-or-equal case
+/// and must succeed without owner co-sign.
+#[test]
+fn test_no_change_does_not_require_owner_cosign() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, agent, _owner, usdc_token) = setup_vault_with_token(&env);
+    let client = NeuroWealthVaultClient::new(&env, &contract_id);
+
+    let user = Address::generate(&env);
+    let deposit_amount = 10_000_000_i128;
+    mint_and_deposit(&env, &client, &usdc_token, &user, deposit_amount);
+
+    // Same total — no decrease path, no owner co-sign needed.
+    client.update_total_assets(&agent, &deposit_amount, &false, &0);
+    assert_eq!(client.get_total_assets(), deposit_amount);
 }

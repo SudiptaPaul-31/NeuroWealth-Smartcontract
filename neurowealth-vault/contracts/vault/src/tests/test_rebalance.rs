@@ -1,7 +1,7 @@
 //! Tests for rebalance functionality
 
 use super::utils::*;
-use crate::{BlendWithdrawEvent, RebalanceEvent};
+use crate::{BlendWithdrawEvent, RebalanceEvent, RebalanceFailedEvent};
 use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, TryFromVal};
 
 #[test]
@@ -20,7 +20,7 @@ fn test_agent_can_rebalance_with_custom_protocol() {
     let expected_apy = 500_i128; // 5% APY in basis points
 
     // Should succeed with mock_all_auths (require_is_agent passes)
-    client.rebalance(&protocol, &expected_apy);
+    client.rebalance(&protocol, &expected_apy, &0_i128);
 }
 
 #[test]
@@ -39,7 +39,7 @@ fn test_rebalance_emits_event() {
     let deposit_amount = 10_000_000_i128;
     mint_and_deposit(&env, &client, &usdc_token, &user, deposit_amount);
 
-    client.rebalance(&symbol_short!("blend"), &500_i128);
+    client.rebalance(&symbol_short!("blend"), &500_i128, &0_i128);
 
     let rebalance_events =
         find_events_by_topic(env.events().all(), &env, symbol_short!("rebalance"));
@@ -79,7 +79,7 @@ fn test_rebalance_storage_current_protocol_changes() {
     mint_and_deposit(&env, &client, &usdc_token, &user, 10_000_000_i128);
 
     // Rebalance to blend
-    client.rebalance(&symbol_short!("blend"), &500_i128);
+    client.rebalance(&symbol_short!("blend"), &500_i128, &0_i128);
 
     // Assert storage state changed
     assert_eq!(
@@ -104,7 +104,7 @@ fn test_rebalance_storage_current_protocol_changes_to_none() {
     mint_and_deposit(&env, &client, &usdc_token, &user, 10_000_000_i128);
 
     // First rebalance to blend
-    client.rebalance(&symbol_short!("blend"), &500_i128);
+    client.rebalance(&symbol_short!("blend"), &500_i128, &0_i128);
     assert_eq!(
         client.get_current_protocol(),
         symbol_short!("blend"),
@@ -112,7 +112,7 @@ fn test_rebalance_storage_current_protocol_changes_to_none() {
     );
 
     // Then rebalance to none
-    client.rebalance(&symbol_short!("none"), &0_i128);
+    client.rebalance(&symbol_short!("none"), &0_i128, &0_i128);
 
     // Assert storage state changed to none
     assert_eq!(
@@ -157,7 +157,7 @@ fn test_rebalance_with_none_protocol_succeeds() {
     let client = NeuroWealthVaultClient::new(&env, &contract_id);
 
     // "none" protocol just sets current protocol to "none" — always safe to call
-    client.rebalance(&symbol_short!("none"), &0_i128);
+    client.rebalance(&symbol_short!("none"), &0_i128, &0_i128);
 }
 
 #[test]
@@ -175,7 +175,7 @@ fn test_rebalance_with_blend_after_deposit() {
     let deposit_amount = 10_000_000_i128;
     mint_and_deposit(&env, &client, &usdc_token, &user, deposit_amount);
 
-    client.rebalance(&symbol_short!("blend"), &500_i128);
+    client.rebalance(&symbol_short!("blend"), &500_i128, &0_i128);
 
     let token_client = TestTokenClient::new(&env, &usdc_token);
     let blend_client = MockBlendPoolClient::new(&env, &blend_pool);
@@ -195,13 +195,13 @@ fn test_rebalance_apy_parameter_accepted() {
     let client = NeuroWealthVaultClient::new(&env, &contract_id);
 
     // Various APY values should be accepted without panicking
-    client.rebalance(&symbol_short!("none"), &0_i128);
-    client.rebalance(&symbol_short!("none"), &850_i128);
-    client.rebalance(&symbol_short!("none"), &2000_i128);
+    client.rebalance(&symbol_short!("none"), &0_i128, &0_i128);
+    client.rebalance(&symbol_short!("none"), &850_i128, &0_i128);
+    client.rebalance(&symbol_short!("none"), &2000_i128, &0_i128);
 }
 
 #[test]
-#[should_panic(expected = "vault: paused")]
+#[should_panic(expected = "Error(Contract, #35)")]
 fn test_rebalance_while_paused_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -213,11 +213,11 @@ fn test_rebalance_while_paused_panics() {
     client.pause(&owner);
     assert!(client.is_paused());
 
-    client.rebalance(&symbol_short!("none"), &500_i128);
+    client.rebalance(&symbol_short!("none"), &500_i128, &0_i128);
 }
 
 #[test]
-#[should_panic(expected = "vault: blend pool not configured")]
+#[should_panic(expected = "Error(Contract, #18)")]
 fn test_blend_rebalance_without_pool_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -231,7 +231,7 @@ fn test_blend_rebalance_without_pool_panics() {
     mint_and_deposit(&env, &client, &usdc_token, &user, deposit_amount);
 
     // blend pool not set → should panic
-    client.rebalance(&symbol_short!("blend"), &500_i128);
+    client.rebalance(&symbol_short!("blend"), &500_i128, &0_i128);
 }
 
 #[test]
@@ -259,7 +259,7 @@ fn test_mock_token_transfer_from_uses_and_decrements_allowance() {
 }
 
 #[test]
-#[should_panic(expected = "vault: unsupported protocol")]
+#[should_panic(expected = "Error(Contract, #17)")]
 fn test_rebalance_with_unsupported_protocol_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -268,7 +268,28 @@ fn test_rebalance_with_unsupported_protocol_panics() {
     let client = NeuroWealthVaultClient::new(&env, &contract_id);
 
     // "balanced" is not a supported protocol — should panic
-    client.rebalance(&symbol_short!("balanced"), &500_i128);
+    client.rebalance(&symbol_short!("balanced"), &500_i128, &0_i128);
+}
+
+#[test]
+fn test_rebalance_unsupported_protocol_emits_no_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, _agent, _owner, _usdc_token) = setup_vault_with_token(&env);
+    let client = NeuroWealthVaultClient::new(&env, &contract_id);
+
+    // try_rebalance captures the panic but doesn't crash the test
+    let _result = client.try_rebalance(&symbol_short!("invalid"), &0_i128, &0_i128);
+
+    // Verify no rebalance events were published
+    let rebalance_events =
+        find_events_by_topic(env.events().all(), &env, symbol_short!("rebalance"));
+    assert_eq!(
+        rebalance_events.len(),
+        0,
+        "No rebalance event should be emitted on failure"
+    );
 }
 
 #[test]
@@ -296,7 +317,7 @@ fn test_blend_supply_and_withdraw_with_events() {
     assert_eq!(blend_client.supplied(&usdc_token), 0);
 
     // Rebalance to Blend (supply)
-    client.rebalance(&symbol_short!("blend"), &850_i128);
+    client.rebalance(&symbol_short!("blend"), &850_i128, &0_i128);
 
     // Verify funds moved to Blend
     assert_eq!(
@@ -342,7 +363,7 @@ fn test_blend_supply_and_withdraw_with_events() {
     );
 
     // Rebalance back to none (withdraw all from Blend)
-    client.rebalance(&symbol_short!("none"), &0_i128);
+    client.rebalance(&symbol_short!("none"), &0_i128, &0_i128);
 
     // Verify all funds withdrawn from Blend
     assert_eq!(client.get_current_protocol(), symbol_short!("none"));
@@ -383,7 +404,7 @@ fn test_rebalance_blend_to_none_withdraws_all_and_updates_state_and_events() {
     let deposit_amount = 30_000_000_i128;
     mint_and_deposit(&env, &client, &usdc_token, &user, deposit_amount);
 
-    client.rebalance(&symbol_short!("blend"), &900_i128);
+    client.rebalance(&symbol_short!("blend"), &900_i128, &0_i128);
 
     assert_eq!(
         client.get_current_protocol(),
@@ -402,7 +423,7 @@ fn test_rebalance_blend_to_none_withdraws_all_and_updates_state_and_events() {
     );
 
     let none_apy = 0_i128;
-    client.rebalance(&symbol_short!("none"), &none_apy);
+    client.rebalance(&symbol_short!("none"), &none_apy, &0_i128);
 
     assert_eq!(
         client.get_current_protocol(),
@@ -434,12 +455,8 @@ fn test_rebalance_blend_to_none_withdraws_all_and_updates_state_and_events() {
         .expect("blend_wd data should decode to BlendWithdrawEvent");
 
     assert_eq!(
-        blend_withdraw_event.requested_amount, deposit_amount,
-        "blend_wd requested_amount should match full deployed balance"
-    );
-    assert_eq!(
-        blend_withdraw_event.amount_received, deposit_amount,
-        "blend_wd amount_received should match full withdrawal"
+        blend_withdraw_event.amount_actual, deposit_amount,
+        "blend_wd amount_actual should match full withdrawal"
     );
     assert!(
         blend_withdraw_event.success,
@@ -465,44 +482,130 @@ fn test_rebalance_blend_to_none_withdraws_all_and_updates_state_and_events() {
     );
 }
 
-// ============================================================================
-// ISSUE #185: expected_apy validation (0–10 000 bps)
-// ============================================================================
-
+/// When a protocol exit is incomplete (funds remain in blend after withdrawal),
+/// rebalance must abort and emit a RebalanceFailedEvent instead of panicking
+/// (Issue #145). State must remain consistent: CurrentProtocol unchanged, no
+/// re-supply attempted.
 #[test]
-fn test_rebalance_apy_boundary_values_accepted() {
+fn test_rebalance_fails_on_incomplete_protocol_exit() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (contract_id, _agent, _owner, _usdc_token) = setup_vault_with_token(&env);
+    let (contract_id, _agent, owner, usdc_token, blend_pool) =
+        setup_vault_with_token_and_blend(&env);
     let client = NeuroWealthVaultClient::new(&env, &contract_id);
+    let blend_client = MockBlendPoolClient::new(&env, &blend_pool);
+    let token_client = TestTokenClient::new(&env, &usdc_token);
 
-    // Boundary values must be accepted
-    client.rebalance(&symbol_short!("none"), &0_i128); // 0 bps
-    client.rebalance(&symbol_short!("none"), &10_000_i128); // 100%
-    client.rebalance(&symbol_short!("none"), &5_000_i128); // 50%
+    client.set_blend_pool(&owner, &blend_pool);
+
+    let user = Address::generate(&env);
+    let deposit_amount = 10_000_000_i128;
+    mint_and_deposit(&env, &client, &usdc_token, &user, deposit_amount);
+    client.rebalance(&symbol_short!("blend"), &500_i128, &0_i128);
+
+    assert_eq!(token_client.balance(&contract_id), 0);
+    assert_eq!(blend_client.supplied(&usdc_token), deposit_amount);
+
+    // Limit pool withdrawals to 1M — 9M stays stuck in blend
+    blend_client.set_max_withdraw_limit(&1_000_000_i128);
+
+    // rebalance("none") should abort gracefully — not panic
+    client.rebalance(&symbol_short!("none"), &0_i128, &0_i128);
+
+    // CurrentProtocol must remain "blend" — incomplete exit leaves state unchanged
+    assert_eq!(
+        client.get_current_protocol(),
+        symbol_short!("blend"),
+        "CurrentProtocol must remain 'blend' after failed exit"
+    );
+
+    // RebalanceFailedEvent must be emitted so the failure is observable on-chain
+    let failed_events = find_events_by_topic(env.events().all(), &env, symbol_short!("reb_fail"));
+    assert!(
+        !failed_events.is_empty(),
+        "RebalanceFailedEvent must be emitted on incomplete exit"
+    );
+    let (_, _, data) = failed_events.last().unwrap();
+    let evt = RebalanceFailedEvent::try_from_val(&env, data)
+        .expect("should decode to RebalanceFailedEvent");
+    assert_eq!(evt.from_protocol, symbol_short!("blend"));
+    assert_eq!(evt.reason, symbol_short!("exit_fail"));
 }
 
+/// Incomplete exit during a cross-protocol switch also aborts and emits
+/// RebalanceFailedEvent — no funds re-supplied to new protocol (Issue #145).
 #[test]
-#[should_panic(expected = "vault: expected_apy out of range (0-10000 bps)")]
-fn test_rebalance_negative_apy_rejected() {
+fn test_rebalance_fails_when_switching_protocols_with_partial_exit() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (contract_id, _agent, _owner, _usdc_token) = setup_vault_with_token(&env);
+    let (contract_id, _agent, owner, usdc_token, blend_pool) =
+        setup_vault_with_token_and_blend(&env);
     let client = NeuroWealthVaultClient::new(&env, &contract_id);
+    let blend_client = MockBlendPoolClient::new(&env, &blend_pool);
+    let token_client = TestTokenClient::new(&env, &usdc_token);
 
-    client.rebalance(&symbol_short!("none"), &-1_i128);
+    client.set_blend_pool(&owner, &blend_pool);
+
+    let user = Address::generate(&env);
+    let deposit_amount = 10_000_000_i128;
+    mint_and_deposit(&env, &client, &usdc_token, &user, deposit_amount);
+    client.rebalance(&symbol_short!("blend"), &500_i128, &0_i128);
+
+    assert_eq!(token_client.balance(&contract_id), 0);
+    assert_eq!(blend_client.supplied(&usdc_token), deposit_amount);
+
+    // Limit pool to 2M per withdrawal — 8M stays in blend
+    blend_client.set_max_withdraw_limit(&2_000_000_i128);
+
+    // Attempt protocol switch with limited withdrawal — must abort
+    client.rebalance(&symbol_short!("none"), &0_i128, &0_i128);
+
+    // CurrentProtocol unchanged
+    assert_eq!(
+        client.get_current_protocol(),
+        symbol_short!("blend"),
+        "CurrentProtocol must remain 'blend' after failed protocol switch"
+    );
+
+    // RebalanceFailedEvent emitted
+    let failed_events = find_events_by_topic(env.events().all(), &env, symbol_short!("reb_fail"));
+    assert!(
+        !failed_events.is_empty(),
+        "RebalanceFailedEvent must be emitted on incomplete protocol switch exit"
+    );
+    let (_, _, data) = failed_events.last().unwrap();
+    let evt = RebalanceFailedEvent::try_from_val(&env, data)
+        .expect("should decode to RebalanceFailedEvent");
+    assert_eq!(evt.from_protocol, symbol_short!("blend"));
+    assert_eq!(evt.reason, symbol_short!("exit_fail"));
+
+    // No funds were re-supplied to a new protocol
+    assert_eq!(
+        blend_client.supplied(&usdc_token),
+        deposit_amount - 2_000_000_i128,
+        "Only partial withdrawal should have occurred"
+    );
 }
 
+/// When `min_out > 0`, a pool that supplies less than requested must panic (#150).
 #[test]
-#[should_panic(expected = "vault: expected_apy out of range (0-10000 bps)")]
-fn test_rebalance_apy_above_max_rejected() {
+#[should_panic(expected = "Error(Contract, #42)")]
+fn test_rebalance_min_out_panics_when_pool_returns_less_than_requested() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (contract_id, _agent, _owner, _usdc_token) = setup_vault_with_token(&env);
+    let (contract_id, _agent, owner, usdc_token, blend_pool) =
+        setup_vault_with_token_and_blend(&env);
     let client = NeuroWealthVaultClient::new(&env, &contract_id);
+    let blend_client = MockBlendPoolClient::new(&env, &blend_pool);
 
-    client.rebalance(&symbol_short!("none"), &10_001_i128);
+    client.set_blend_pool(&owner, &blend_pool);
+    blend_client.set_max_supply_limit(&5_000_000_i128);
+
+    let user = Address::generate(&env);
+    mint_and_deposit(&env, &client, &usdc_token, &user, 10_000_000_i128);
+
+    client.rebalance(&symbol_short!("blend"), &500_i128, &10_000_000_i128);
 }

@@ -19,11 +19,14 @@ fn test_blend_integration_supply_via_rebalance() {
     assert_eq!(token_client.balance(&vault_id), deposit_amount);
 
     // 2. Set Blend Pool address in Vault
+    // Note: setup_vault_with_token_and_blend already initializes the vault,
+    // but we need to set the blend pool.
+    // In setup_vault_with_token_and_blend, agent is the owner.
     vault_client.set_blend_pool(&owner, &blend_pool);
 
     // 3. Trigger rebalance to Blend
     let protocol = Symbol::new(&env, "blend");
-    vault_client.rebalance(&protocol, &850); // 8.5% expected APY
+    vault_client.rebalance(&protocol, &850, &0_i128); // 8.5% expected APY
 
     // 4. Verify results
     // - Vault USDC balance should be 0 (transferred to Blend)
@@ -54,11 +57,11 @@ fn test_blend_integration_withdraw_via_rebalance() {
     // 1. Supply to Blend first
     let amount = 50_000_000;
     token_client.mint(&vault_id, &amount);
-    vault_client.rebalance(&Symbol::new(&env, "blend"), &850);
+    vault_client.rebalance(&Symbol::new(&env, "blend"), &850, &0_i128);
     assert_eq!(token_client.balance(&blend_pool), amount);
 
     // 2. Withdraw from Blend by rebalancing to "none"
-    vault_client.rebalance(&Symbol::new(&env, "none"), &0);
+    vault_client.rebalance(&Symbol::new(&env, "none"), &0, &0_i128);
 
     // 3. Verify results
     // - Vault USDC balance should be restored
@@ -92,7 +95,7 @@ fn test_blend_integration_balance_read() {
     // 1. Supply some funds
     let amount = 75_000_000;
     token_client.mint(&vault_id, &amount);
-    vault_client.rebalance(&Symbol::new(&env, "blend"), &850);
+    vault_client.rebalance(&Symbol::new(&env, "blend"), &850, &0_i128);
 
     // 2. Check balance via vault's internal get_blend_pool getter
     // Note: The vault doesn't have a public get_blend_balance, but we can verify it indirectly

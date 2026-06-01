@@ -19,7 +19,7 @@ Growing DeFi ecosystem — Blend (lending), Templar (borrowing), RWA protocols
 
 
 Features
-FeatureDescription🤖 AI AgentAutonomous 24/7 yield optimization across Stellar DeFi💬 Natural LanguageChat to deposit, withdraw, and check balances📈 Auto-RebalancingAgent shifts funds to best opportunities automatically🔐 Non-CustodialYour funds live in audited Soroban smart contracts⚡ Instant WithdrawalsNo lock-ups, no penalties, withdraw anytime📱 WhatsApp ReadyFull functionality through WhatsApp chat interface🌍 Global AccessNo geographic restrictions, no bank account required🛡️ Security FirstSoroban contracts with ReentrancyGuard and access controls
+FeatureDescription🤖 AI AgentAutonomous 24/7 yield optimization across Stellar DeFi💬 Natural LanguageChat to deposit, withdraw, and check balances📈 Auto-RebalancingAgent shifts funds to best opportunities automatically🔐 Non-CustodialYour funds live in audited Soroban smart contracts⚡ Instant WithdrawalsNo lock-ups, no penalties, withdraw anytime📱 WhatsApp ReadyFull functionality through WhatsApp chat interface🌍 Global AccessNo geographic restrictions, no bank account required🛡️ Security FirstSoroban contracts protected by strict CEI ordering and access controls
 
 How It Works
 1. User deposits USDC via web app
@@ -46,7 +46,7 @@ Smart Contracts
 Language: Rust (Soroban SDK 21.0.0)
 Standard: ERC-4626 inspired vault architecture
 Network: Stellar Mainnet / Testnet
-Security: OpenZeppelin-equivalent patterns (ReentrancyGuard, Pausable, Access Control)
+Security: OpenZeppelin-equivalent patterns (Pausable, Access Control) and strict CEI pattern for reentrancy protection
 
 Backend / AI Agent
 
@@ -105,8 +105,8 @@ bash# Install Rust and the wasm target
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup target add wasm32-unknown-unknown
 
-# Install Stellar CLI
-cargo install --locked stellar-cli --features opt
+# Install Stellar CLI (Pinned to version 21.2.0)
+cargo install --locked stellar-cli --version 21.2.0 --features opt
 
 # Install Node.js dependencies (for agent and frontend)
 npm install
@@ -164,7 +164,24 @@ npm run dev        # http://localhost:3000
 Smart Contract
 The core Soroban vault contract handles all on-chain fund management.
 Key Functions
-FunctionWho Can CallDescriptioninitializeOwner (once)Set agent address and USDC tokendepositAny verified userDeposit USDC into the vaultwithdrawUser (their own funds)Withdraw USDC back to walletwithdraw_allUser (their own funds)Withdraw all USDC by burning all sharesrebalanceAI Agent onlyMove funds between yield strategiesget_balanceAnyoneRead a user's current balanceget_total_depositsAnyoneRead total vault TVLtransfer_ownershipOwner onlyInitiate two-step ownership transferaccept_ownershipPending owner onlyComplete ownership transfer
+
+| Function | Who Can Call | Description |
+| :--- | :--- | :--- |
+| `initialize` | Owner (once) | Set agent address and USDC token |
+| `deposit` | Any verified user | Deposit USDC into the vault |
+| `withdraw` | User (their own funds) | Withdraw USDC back to wallet |
+| `withdraw_all` | User (their own funds) | Withdraw all USDC by burning all shares |
+| `rebalance` | AI Agent only | Move funds between yield strategies (`protocol`, `expected_apy`, `min_out`; supported: `blend`, `none`) |
+| `get_balance` | Anyone | Read a user's current balance |
+| `get_total_deposits` | Anyone | Read total vault TVL |
+| `get_exchange_rate` | Anyone | Read current exchange rate (assets per share * 10,000,000) |
+| `transfer_ownership` | Owner only | Initiate two-step ownership transfer |
+| `accept_ownership` | Pending owner only | Complete ownership transfer |
+| `set_caps` | Owner only | Sets both user deposit cap and TVL cap in a single transaction |
+| `set_deposit_limits` | Owner only | Sets minimum and maximum per-transaction deposit limits |
+| `set_tvl_cap` | Owner only | Sets the maximum total TVL that can be deposited |
+| `set_user_deposit_cap` | Owner only | Sets the maximum deposit amount per user |
+| `set_limits` | Owner only | **Deprecated**: Sets user deposit cap and TVL cap (use `set_caps` instead) |
 Security Model
 
 Users can only withdraw their own funds — enforced at the contract level via user.require_auth()
@@ -173,7 +190,68 @@ Minimum deposit: 1 USDC. Maximum per user: 10,000 USDC (configurable)
 Emergency pause functionality available to contract owner
 Two-step ownership transfer prevents accidental ownership loss
 Vault balance verification ensures reported assets match actual holdings
-TTL extension on critical storage prevents data expiration
+Read-only getters have no TTL side effects; call `touch_user_ttl` to extend user share entry TTL
+Strict Checks-Effects-Interactions (CEI) pattern prevents reentrancy without needing explicit locks (see [reentrancy protection tests](neurowealth-vault/contracts/vault/src/tests/test_legacy_inline.rs))
+
+Secure Deployment Sequence
+
+`initialize()` is protected against front-running: the contract verifies that the `deployer`
+argument + `salt` cryptographically reproduce the deployed contract address, **and** requires
+a live authorization signature from that deployer keypair. This means no third party can
+seize ownership even if they observe the deployment transaction in the mempool.
+
+Follow these steps in order to safely initialize a new vault:
+
+1. **Generate a deployer keypair** (one-time use, only for initialization):
+   ```bash
+   stellar keys generate deployer --network testnet
+   stellar keys address deployer   # note the deployer address
+   ```
+
+2. **Choose a salt** (32 bytes; any fixed value works — must be the same across steps):
+   ```bash
+   # example: all-zero salt
+   SALT="0000000000000000000000000000000000000000000000000000000000000000"
+   ```
+
+3. **Deploy the contract** using the deployer keypair and the chosen salt:
+   ```bash
+   stellar contract deploy \
+     --wasm target/wasm32-unknown-unknown/release/neurowealth_vault.wasm \
+     --source deployer \
+     --network testnet \
+     --salt $SALT
+   # save the output as VAULT_CONTRACT_ID
+   ```
+
+4. **Immediately call `initialize()`** from the same deployer keypair:
+   ```bash
+   stellar contract invoke \
+     --id $VAULT_CONTRACT_ID \
+     --source deployer \
+     --network testnet \
+     -- \
+     initialize \
+     --deployer $(stellar keys address deployer) \
+     --owner  $OWNER_ADDRESS \
+     --agent  $AGENT_ADDRESS \
+     --usdc_token $USDC_TOKEN_ADDRESS \
+     --salt   $SALT
+   ```
+   The contract rejects any caller whose `deployer` argument does not reproduce
+   `VAULT_CONTRACT_ID`, and additionally requires a valid signature from that
+   address via `deployer.require_auth()`.
+
+5. **Verify initialization** (read-only, no auth needed):
+   ```bash
+   stellar contract invoke --id $VAULT_CONTRACT_ID --source deployer \
+     --network testnet -- get_owner
+   stellar contract invoke --id $VAULT_CONTRACT_ID --source deployer \
+     --network testnet -- get_agent
+   ```
+
+6. **Secure or discard the deployer keypair** — it has no further privileged role
+   after initialization. The `owner` keypair is now the administrator.
 
 
 AI Agent
@@ -338,11 +416,16 @@ Phase 3 — Scale
  NeuroWealth token for governance and fee sharing
 
 
-Contributing
-Contributions are welcome. Please open an issue first to discuss what you'd like to change.
-bash# Fork the repo, then:
-git checkout -b feature/your-feature-name
-git commit -m "feat: add your feature"
-git push origin feature/your-feature-name
-# Open a Pull Request
-Please make sure to run cargo test and npm test before submitting.
+## Contributing
+Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md) for details on our code of conduct, development setup, and the process for submitting pull requests.
+
+### Quick Start for Contributors
+1. **Fork the repo**, then:
+   ```bash
+   git checkout -b feature/your-feature-name
+   git commit -m "feat: add your feature"
+   git push origin feature/your-feature-name
+   ```
+2. **Open a Pull Request** against the `develop` branch.
+3. Please make sure to run `cargo test` and `npm test` before submitting.
+

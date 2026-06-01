@@ -1,9 +1,17 @@
 mod test_access_control;
+mod test_update_total_assets_blend;
+mod test_auth;
+#[cfg(feature = "blend-devnet")]
+mod test_blend_devnet;
 mod test_blend_integration;
 mod test_budget;
+mod test_checked_arithmetic;
 mod test_deposit;
 mod test_event_schema;
 mod test_events;
+mod test_exchange_rate;
+mod test_fuzz_deposit_withdraw;
+mod test_inflation_attack;
 mod test_initialize;
 mod test_legacy_inline;
 mod test_limits;
@@ -14,6 +22,7 @@ mod test_rebalance_integration;
 mod test_rounding_math;
 mod test_shares;
 mod test_total_assets_cap;
+mod test_ttl;
 mod test_withdraw;
 mod test_yield;
 mod utils;

@@ -3,7 +3,7 @@
 extern crate std;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, testutils::Address as _, Address, Env, Symbol,
+    contract, contractimpl, contracttype, testutils::Address as _, Address, BytesN, Env, Symbol,
     TryFromVal, Val, Vec,
 };
 
@@ -26,6 +26,10 @@ enum TokenDataKey {
 #[contracttype]
 enum BlendMockDataKey {
     Supplied(Address),
+    /// Configurable max supply limit (0 = no limit, use requested amount)
+    MaxSupplyLimit,
+    /// Configurable max withdraw limit per transaction (0 = no limit)
+    MaxWithdrawLimit,
 }
 
 pub mod token {
@@ -182,26 +186,60 @@ pub mod blend {
                 "expected allowance before pool pull"
             );
 
-            token_client.transfer_from(
-                &env.current_contract_address(),
-                &spender,
-                &env.current_contract_address(),
-                &request.amount,
-            );
-
-            let total_supplied: i128 = env
+            // Check for configured supply shortfall limit
+            let max_supply_limit: i128 = env
                 .storage()
                 .persistent()
-                .get(&BlendMockDataKey::Supplied(request.address.clone()))
+                .get(&BlendMockDataKey::MaxSupplyLimit)
                 .unwrap_or(0);
-            env.storage().persistent().set(
-                &BlendMockDataKey::Supplied(request.address),
-                &(total_supplied + request.amount),
-            );
+
+            // Calculate actual amount to supply (respecting limits)
+            let actual_amount = if max_supply_limit < 0 {
+                0
+            } else if max_supply_limit > 0 {
+                core::cmp::min(request.amount, max_supply_limit)
+            } else {
+                request.amount
+            };
+
+            if actual_amount > 0 {
+                token_client.transfer_from(
+                    &env.current_contract_address(),
+                    &spender,
+                    &env.current_contract_address(),
+                    &actual_amount,
+                );
+
+                let total_supplied: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&BlendMockDataKey::Supplied(request.address.clone()))
+                    .unwrap_or(0);
+                env.storage().persistent().set(
+                    &BlendMockDataKey::Supplied(request.address),
+                    &(total_supplied + actual_amount),
+                );
+            }
 
             from.clone().require_auth();
 
-            request.amount
+            actual_amount
+        }
+
+        /// Sets a max supply limit to simulate pool shortfall scenarios.
+        /// 0 = no limit (default behavior)
+        pub fn set_max_supply_limit(env: Env, limit: i128) {
+            env.storage()
+                .persistent()
+                .set(&BlendMockDataKey::MaxSupplyLimit, &limit);
+        }
+
+        /// Sets a max withdraw limit to simulate withdrawal failures/stuck funds.
+        /// 0 = no limit (default behavior)
+        pub fn set_max_withdraw_limit(env: Env, limit: i128) {
+            env.storage()
+                .persistent()
+                .set(&BlendMockDataKey::MaxWithdrawLimit, &limit);
         }
 
         pub fn submit(env: Env, from: Address, to: Address, requests: Vec<crate::BlendRequest>) {
@@ -218,11 +256,24 @@ pub mod blend {
                     // Withdraw request (type 1)
                     let amount_to_withdraw = core::cmp::min(request.amount, pool_balance);
 
-                    if amount_to_withdraw > 0 {
+                    // Check for configured withdrawal limit (to simulate stuck funds scenarios)
+                    let max_withdraw_limit: i128 = env
+                        .storage()
+                        .persistent()
+                        .get(&BlendMockDataKey::MaxWithdrawLimit)
+                        .unwrap_or(0);
+
+                    let actual_withdraw = if max_withdraw_limit > 0 {
+                        core::cmp::min(amount_to_withdraw, max_withdraw_limit)
+                    } else {
+                        amount_to_withdraw
+                    };
+
+                    if actual_withdraw > 0 {
                         token_client.transfer(
                             &env.current_contract_address(),
                             &to,
-                            &amount_to_withdraw,
+                            &actual_withdraw,
                         );
 
                         // Update supplied tracking
@@ -233,7 +284,7 @@ pub mod blend {
                             .unwrap_or(0);
                         env.storage().persistent().set(
                             &BlendMockDataKey::Supplied(request.address.clone()),
-                            &(total_supplied - amount_to_withdraw),
+                            &(total_supplied - actual_withdraw),
                         );
                     }
                 }
@@ -268,6 +319,20 @@ pub mod blend {
                 .get(&BlendMockDataKey::Supplied(asset))
                 .unwrap_or(0)
         }
+
+        pub fn get_max_supply_limit(env: Env) -> i128 {
+            env.storage()
+                .persistent()
+                .get(&BlendMockDataKey::MaxSupplyLimit)
+                .unwrap_or(0)
+        }
+
+        pub fn get_max_withdraw_limit(env: Env) -> i128 {
+            env.storage()
+                .persistent()
+                .get(&BlendMockDataKey::MaxWithdrawLimit)
+                .unwrap_or(0)
+        }
     }
 }
 
@@ -284,13 +349,21 @@ pub fn setup_vault(env: &Env) -> (Address, Address, Address) {
 
 /// Sets up a vault with a real deployed TestToken contract.
 pub fn setup_vault_with_token(env: &Env) -> (Address, Address, Address, Address) {
-    let contract_id = env.register_contract(None, NeuroWealthVault);
+    let deployer = Address::generate(env);
+    let salt = BytesN::from_array(env, &[0u8; 32]);
+    let contract_id = env
+        .deployer()
+        .with_address(deployer.clone(), salt.clone())
+        .deployed_address();
+    env.register_contract(&contract_id, NeuroWealthVault);
+
     let client = NeuroWealthVaultClient::new(env, &contract_id);
     let agent = Address::generate(env);
     let usdc_token = env.register_contract(None, TestToken);
+    // Generate a distinct address for owner to decouple roles
     let owner = Address::generate(env);
 
-    client.initialize(&owner, &agent, &usdc_token);
+    client.initialize(&deployer, &owner, &agent, &usdc_token, &salt);
 
     (contract_id, agent, owner, usdc_token)
 }
