@@ -257,6 +257,10 @@ pub struct RebalanceEvent {
     pub amount_attempted: i128,
     /// Amount actually moved
     pub amount_moved: i128,
+    /// Amount supplied into the target protocol
+    pub amount_supplied: i128,
+    /// Amount withdrawn from the current protocol
+    pub amount_withdrawn: i128,
 }
 
 /// Emitted when [`DataKey::CurrentProtocol`] changes.
@@ -1357,6 +1361,8 @@ impl NeuroWealthVault {
 
         let mut amount_attempted = 0_i128;
         let mut amount_moved = 0_i128;
+        let mut amount_supplied = 0_i128;
+        let mut amount_withdrawn = 0_i128;
 
         // If switching protocols, exit the current one first.
         // On incomplete exit, emit RebalanceFailedEvent and abort — no further
@@ -1366,6 +1372,7 @@ impl NeuroWealthVault {
             amount_attempted = amount_attempted.saturating_add(expected_withdrawal);
 
             let withdrawn = Self::withdraw_from_protocol(&env, &current_protocol, min_out);
+            amount_withdrawn = amount_withdrawn.saturating_add(withdrawn);
             amount_moved = amount_moved.saturating_add(withdrawn);
 
             if expected_withdrawal > 0 {
@@ -1399,6 +1406,7 @@ impl NeuroWealthVault {
             if vault_balance > 0 {
                 amount_attempted = amount_attempted.saturating_add(vault_balance);
                 let supplied = Self::supply_to_blend(&env, vault_balance, min_out);
+                amount_supplied = amount_supplied.saturating_add(supplied);
                 amount_moved = amount_moved.saturating_add(supplied);
 
                 if supplied == 0 {
@@ -1421,6 +1429,8 @@ impl NeuroWealthVault {
                     status,
                     amount_attempted,
                     amount_moved,
+                    amount_supplied,
+                    amount_withdrawn,
                 },
             );
         } else if protocol == symbol_short!("none") {
@@ -1431,6 +1441,7 @@ impl NeuroWealthVault {
                 amount_attempted = amount_attempted.saturating_add(expected_withdrawal);
 
                 let withdrawn = Self::withdraw_from_protocol(&env, &current_protocol, min_out);
+                amount_withdrawn = amount_withdrawn.saturating_add(withdrawn);
                 amount_moved = amount_moved.saturating_add(withdrawn);
 
                 if expected_withdrawal > 0 {
@@ -1460,6 +1471,8 @@ impl NeuroWealthVault {
                     status,
                     amount_attempted,
                     amount_moved,
+                    amount_supplied,
+                    amount_withdrawn,
                 },
             );
         }
