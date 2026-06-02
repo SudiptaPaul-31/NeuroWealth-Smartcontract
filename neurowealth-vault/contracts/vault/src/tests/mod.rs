@@ -18,6 +18,7 @@ mod test_limits;
 mod test_math_limits;
 mod test_pause;
 mod test_rebalance;
+mod test_rebalance_cooldown;
 mod test_rebalance_integration;
 mod test_rounding_math;
 mod test_shares;
