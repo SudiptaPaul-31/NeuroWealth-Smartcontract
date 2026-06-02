@@ -1312,7 +1312,7 @@ impl NeuroWealthVault {
                 let needed = entitled_amount
                     .checked_sub(vault_balance)
                     .expect("vault: math error");
-                let _ = Self::withdraw_from_blend(&env, needed, 0);
+                let _ = Self::withdraw_from_blend(&env, needed);
 
                 // RECONCILIATION: Check actual available USDC after potential Blend withdrawal
                 let available_usdc = token_client.balance(&env.current_contract_address());
@@ -1448,6 +1448,10 @@ impl NeuroWealthVault {
         Self::require_initialized(&env);
         Self::require_not_paused(&env);
         Self::require_is_agent(&env);
+        assert!(
+            (0..=10_000).contains(&expected_apy),
+            "vault: expected_apy out of range (0-10000 bps)"
+        );
 
         if min_out < 0 {
             panic_with_error!(&env, VaultError::MinOutMustBeNonNegative);
@@ -2533,6 +2537,7 @@ impl NeuroWealthVault {
     pub fn upgrade(env: Env, owner: Address, new_wasm_hash: BytesN<32>) {
         Self::require_initialized(&env);
         owner.require_auth();
+        Self::require_not_paused(&env);
 
         let stored_owner: Address = env.storage().instance().get(&DataKey::Owner).unwrap();
         Self::require(&env, owner == stored_owner, VaultError::CallerIsNotOwner);
@@ -2614,7 +2619,11 @@ impl NeuroWealthVault {
     pub fn get_balance(env: Env, user: Address) -> i128 {
         Self::require_initialized(&env);
 
-        let shares = Self::read_shares(&env, &user);
+        let shares: i128 = env
+            .storage()
+            .persistent()
+            .get(&shares_key)
+            .unwrap_or(0_i128);
         if shares == 0 {
             return 0;
         }
@@ -2791,8 +2800,11 @@ impl NeuroWealthVault {
         if !env.storage().persistent().has(&shares_key) {
             return false;
         }
-        Self::extend_user_shares_ttl(&env, &user);
-        true
+
+        env.storage()
+            .persistent()
+            .get(&shares_key)
+            .unwrap_or(0_i128)
     }
 
     /// Returns both the principal balance and share balance for a user.
@@ -3386,22 +3398,24 @@ impl NeuroWealthVault {
                 .persistent()
                 .get(&DataKey::Shares(user.clone()))
                 .unwrap_or(0_i128);
-            let current_assets = Self::convert_to_assets_internal(env, user_shares);
-            Self::require(
-                env,
-                current_assets
+            assert!(
+                current_balance
                     .checked_add(amount)
                     .expect("vault: cap check overflow")
                     <= cap,
-                VaultError::ExceedsUserDepositCap,
+                "vault: exceeds user deposit cap"
             );
         }
     }
 
     /// Validates that a deposit is within the TVL cap.
     ///
+    /// Uses `TotalAssets` (principal + yield) so the cap reflects actual vault TVL
+    /// rather than just principal. After yield accrual, `TotalAssets` can exceed
+    /// `TotalDeposits`, and the cap check correctly accounts for that.
+    ///
     /// # Panics
-    /// - If total deposits would exceed the TVL cap
+    /// - If total assets plus the new deposit would exceed the TVL cap
     #[inline]
     fn require_within_tvl_cap(env: &Env, amount: i128) {
         let cap: i128 = env
@@ -3410,18 +3424,13 @@ impl NeuroWealthVault {
             .get(&DataKey::TvLCap)
             .unwrap_or(0_i128);
         if cap > 0 {
-            let total: i128 = env
-                .storage()
-                .instance()
-                .get(&DataKey::TotalDeposits)
-                .unwrap_or(0_i128);
-            Self::require(
-                env,
+            let total = Self::get_total_assets_internal(env);
+            assert!(
                 total
                     .checked_add(amount)
                     .expect("vault: cap check overflow")
                     <= cap,
-                VaultError::ExceedsTvlCap,
+                "vault: exceeds TVL cap"
             );
         }
     }

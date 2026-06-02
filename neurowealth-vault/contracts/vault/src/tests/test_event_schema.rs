@@ -379,7 +379,7 @@ fn test_event_schema_emergency_events() {
 
     // Test emergency pause event
     client.emergency_pause(&owner);
-    let emerg_events = find_events_by_topic(env.events().all(), &env, TOPIC_EMERGENCY_PAUSED);
+    let emerg_events = find_events_by_topic(env.events().all(), &env, symbol_short!("emerg"));
     assert_eq!(
         emerg_events.len(),
         1,
