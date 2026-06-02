@@ -71,6 +71,8 @@
 //! - `TvlCap`: Maximum total value locked in the vault
 //! - `UserDepositCap`: Maximum deposit per user
 //! - `Version`: Contract version for upgrade tracking
+//! - `MinRebalanceInterval`: Minimum ledgers between rebalances (owner-configurable, Issue #59)
+//! - `LastRebalanceLedger`: Ledger number of the most recent successful rebalance call (Issue #59)
 //!
 //! ### Persistent Storage (Per-User, Cheaper)
 //! - `Balance(user)`: USDC balance for each user address
@@ -210,6 +212,8 @@ pub enum VaultError {
     ExceedsTvlCap = 41,
     /// A protocol leg returned less than min_out.
     MinOutNotMet = 42,
+    /// Rebalance called before the configured cooldown has elapsed.
+    RebalanceCooldownActive = 43,
 }
 
 // ============================================================================
@@ -278,6 +282,14 @@ pub enum DataKey {
     /// Deployer address - the address that deployed the contract
     /// Used for signature verification during initialization to prevent front-running
     Deployer,
+    /// Minimum number of ledgers that must elapse between rebalance() calls.
+    /// Configurable by the owner. When absent, no cooldown is enforced.
+    /// (Issue #59)
+    MinRebalanceInterval,
+    /// Ledger sequence number of the most recent successful rebalance() call.
+    /// Written at the end of every successful rebalance.
+    /// (Issue #59)
+    LastRebalanceLedger,
 }
 
 // ============================================================================
@@ -1443,6 +1455,7 @@ impl NeuroWealthVault {
     ///
     /// - If caller is not the authorized agent.
     /// - If vault is paused.
+    /// - If the rebalance cooldown has not elapsed (`RebalanceCooldownActive`).
     /// - If protocol is unsupported.
     /// - If slippage protection (min_out) is triggered.
     /// - If protocol interaction fails.
@@ -1456,6 +1469,26 @@ impl NeuroWealthVault {
             (0..=10_000).contains(&expected_apy),
             "vault: expected_apy out of range (0-10000 bps)"
         );
+
+        // ── Rebalance cooldown guard (Issue #59) ──────────────────────────────
+        // If a minimum interval has been configured by the owner, enforce it.
+        if let Some(min_interval) = env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::MinRebalanceInterval)
+        {
+            let current_ledger = env.ledger().sequence();
+            let last_rebalance: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::LastRebalanceLedger)
+                .unwrap_or(0);
+            let elapsed = current_ledger.saturating_sub(last_rebalance);
+            if elapsed < min_interval {
+                panic_with_error!(&env, VaultError::RebalanceCooldownActive);
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────
 
         if min_out < 0 {
             panic_with_error!(&env, VaultError::MinOutMustBeNonNegative);
@@ -1590,6 +1623,12 @@ impl NeuroWealthVault {
                 },
             );
         }
+
+        // Persist the ledger of this successful rebalance so the next call can
+        // be checked against the cooldown interval (Issue #59).
+        env.storage()
+            .instance()
+            .set(&DataKey::LastRebalanceLedger, &env.ledger().sequence());
     }
 
     // ==========================================================================
@@ -2046,6 +2085,88 @@ impl NeuroWealthVault {
             },
         );
     }
+
+    // ==========================================================================
+    // ADMINISTRATIVE - REBALANCE COOLDOWN (Issue #59)
+    // ==========================================================================
+
+    /// Sets the minimum number of ledgers that must elapse between consecutive
+    /// rebalance() calls.
+    ///
+    /// Only the owner can call this function. Setting `interval` to `0` disables
+    /// the cooldown entirely (no throttle).
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment.
+    /// * `interval` - Minimum ledgers between rebalances. `0` = no cooldown.
+    ///
+    /// # Returns
+    ///
+    /// None.
+    ///
+    /// # Events
+    ///
+    /// None.
+    ///
+    /// # Errors
+    ///
+    /// None.
+    ///
+    /// # Panics
+    ///
+    /// - If the caller is not the owner.
+    pub fn set_rebalance_cooldown(env: Env, interval: u32) {
+        Self::require_initialized(&env);
+        Self::require_is_owner(&env);
+
+        if interval == 0 {
+            // Removing the key disables the cooldown entirely.
+            env.storage()
+                .instance()
+                .remove(&DataKey::MinRebalanceInterval);
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::MinRebalanceInterval, &interval);
+        }
+    }
+
+    /// Returns the configured minimum rebalance interval (ledgers), or `0` if
+    /// no cooldown has been set.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// The minimum ledgers between rebalances, or `0` when disabled.
+    pub fn get_rebalance_cooldown(env: Env) -> u32 {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::MinRebalanceInterval)
+            .unwrap_or(0)
+    }
+
+    /// Returns the ledger sequence number of the most recent successful
+    /// rebalance() call, or `0` if rebalance has never been called.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// The ledger of the last rebalance, or `0`.
+    pub fn get_last_rebalance_ledger(env: Env) -> u32 {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::LastRebalanceLedger)
+            .unwrap_or(0)
+    }
+
+    // ==========================================================================
+    // ADMINISTRATIVE - CONFIGURATION
+    // ==========================================================================
 
     /// Returns the current TVL cap.
     ///
