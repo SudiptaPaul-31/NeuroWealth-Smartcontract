@@ -557,7 +557,7 @@ fn test_all_event_topics_schema_compliance() {
                     description
                 );
             }
-            "emerg" => {
+            "emergency" => {
                 let events = find_events_by_topic(env.events().all(), &env, TOPIC_EMERGENCY_PAUSED);
                 assert!(
                     !events.is_empty(),
@@ -566,7 +566,7 @@ fn test_all_event_topics_schema_compliance() {
                     description
                 );
             }
-            "l_upd" => {
+            "limits" => {
                 let events = find_events_by_topic(env.events().all(), &env, TOPIC_LIMITS_UPDATED);
                 assert!(
                     !events.is_empty(),

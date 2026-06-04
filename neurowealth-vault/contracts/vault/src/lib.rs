@@ -114,6 +114,8 @@
 #![no_std]
 #![allow(deprecated)]
 
+pub mod topics;
+
 use core::cmp::min;
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
