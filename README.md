@@ -70,66 +70,111 @@ Price Feeds: Stellar anchor price feeds
 
 
 ## Project Structure
+
 ```text
 NeuroWealth-Smartcontract/
 ├── neurowealth-vault/          # Soroban smart contracts workspace
 │   ├── Cargo.toml
-│   └── contracts/
-│       └── vault/              # Core vault contract
-│           ├── Cargo.toml
-│           └── src/
-│               ├── lib.rs      # Core vault logic
-│               └── topics.rs   # Centralized event topics
+│   ├── contracts/
+│   │   └── vault/              # Core vault contract
+│   │       ├── Cargo.toml
+│   │       └── src/
+│   │           ├── lib.rs      # Contract logic, events, error types
+│   │           └── topics.rs   # Exported event topic constants
+│   └── fuzz/                   # Libfuzzer fuzz targets
 ├── scripts/                    # Deployment and utility scripts
-│   ├── deploy-devnet.sh
-│   └── ...
-├── agent/                      # [Planned] AI agent backend
-├── frontend/                   # [Planned] Next.js web app
-├── whatsapp/                   # [Planned] WhatsApp bot handler
-├── ARCHITECTURE.md             # System architecture documentation
-├── EVENTS.md                   # Event schema documentation
-├── SECURITY.md                 # Security and trust model
+│   ├── deploy-devnet.sh        # One-command devnet deploy
+│   ├── e2e-devnet.sh           # End-to-end devnet tests
+│   ├── verify-deployment.sh
+│   ├── generate-spec.py        # Generate contract-spec.json
+│   ├── validate-spec.py
+│   ├── README-E2E.md           # E2E test guide
+│   └── README-SPEC.md          # Spec generation guide
+├── docs/
+│   ├── MAINNET_CHECKLIST.md    # Pre-mainnet sign-off checklist
+│   ├── UPGRADE_MIGRATION.md    # Contract upgrade guide
+│   └── WASM_SIZE.md            # WASM size tracking
+├── .env.devnet.template        # Environment variable template
+├── deny.toml                   # cargo-deny dependency audit config
+├── ARCHITECTURE.md             # Storage layout, data flows, invariants
+├── EVENTS.md                   # Full event schema reference
+├── SECURITY.md                 # Trust model and threat analysis
+├── CONTRIBUTING.md             # Development setup and PR process
+├── CHANGELOG.md
 └── README.md
 ```
+
+### Planned Components
+
+The following are not yet in this repository and will be added as separate
+directories once development begins:
+
+| Component | Directory | Status |
+|-----------|-----------|--------|
+| AI agent backend (Node.js / Python) | `agent/` | Planned |
+| Next.js web frontend | `frontend/` | Planned |
+| WhatsApp bot handler | `whatsapp/` | Planned |
 
 ## Getting Started
 
 ### Prerequisites
+
+Install Rust and the WASM target:
 ```bash
-# Install Rust and the wasm target
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup target add wasm32-unknown-unknown
+```
 
-# Install Stellar CLI (Pinned to version 21.2.0)
+Install the Stellar CLI (pinned to 21.2.0):
+```bash
 cargo install --locked stellar-cli --version 21.2.0 --features opt
+```
 
 ### Environment Variables
-Create a `.env` file in the root using `.env.devnet.template` as a guide.
 
-### Build and Deploy the Contract
+Copy the template and add your secret key:
 ```bash
-# Build the Soroban vault contract
-cd neurowealth-vault
-cargo build --release --target wasm32-unknown-unknown
+cp .env.devnet.template .env.devnet
+# Edit .env.devnet and set SOROBAN_SECRET_KEY
+```
 
-# Deploy to testnet/devnet using provided scripts
+### Build the Contract
+
+```bash
+cd neurowealth-vault
+stellar contract build
+```
+
+The compiled WASM is output to `target/wasm32v1-none/release/neurowealth_vault.wasm`.
+
+### Run Tests
+
+```bash
+cd neurowealth-vault
+cargo test
+```
+
+### Deploy to Devnet
+
+```bash
 ./scripts/deploy-devnet.sh
 ```
-  -- \
-  initialize \
-  --agent YOUR_AGENT_ADDRESS \
-  --usdc_token USDC_TOKEN_ADDRESS
-Run the AI Agent
-bashcd agent
-npm install
-npm run dev        # development
-npm run start      # production
-Run the Frontend
-bashcd frontend
-npm install
-npm run dev        # http://localhost:3000
 
-Smart Contract
+See [`scripts/README-E2E.md`](scripts/README-E2E.md) for end-to-end devnet validation.
+
+> For the AI agent, frontend, and WhatsApp bot — see [Planned Components](#planned-components) above.
+
+## Further Reading
+
+| Document | Purpose |
+|----------|---------|
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Storage layout, share accounting math, asset flow diagrams |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Development setup, CI requirements, PR process |
+| [`scripts/README-E2E.md`](scripts/README-E2E.md) | End-to-end devnet test guide |
+| [`SECURITY.md`](SECURITY.md) | Trust model and threat analysis |
+| [`docs/MAINNET_CHECKLIST.md`](docs/MAINNET_CHECKLIST.md) | Pre-mainnet deployment checklist |
+
+## Smart Contract
 The core Soroban vault contract handles all on-chain fund management.
 Key Functions
 
@@ -302,7 +347,7 @@ For testing and development, you can deploy to Stellar devnet in minutes:
 3. **Build contracts**
    ```bash
    cd neurowealth-vault
-   cargo build --release --target wasm32-unknown-unknown
+   stellar contract build
    ```
 
 4. **Deploy to devnet**
